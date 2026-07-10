@@ -101,9 +101,7 @@ def setup_browser():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
     options.add_argument("--silent")
-    options.add_argument("--disable-logging")
     options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
     options.add_argument(f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
 
     prefs = {
@@ -112,14 +110,12 @@ def setup_browser():
         "profile.password_manager_enabled": False,
     }
     options.add_experimental_option("prefs", prefs)
-    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    options.add_experimental_option("useAutomationExtension", False)
 
     # Подавляем вывод ChromeDriver
     import logging
     logging.getLogger("undetected_chromedriver").setLevel(logging.WARNING)
 
-    driver = uc.Chrome(options=options, version_main=125)
+    driver = uc.Chrome(options=options)
     driver.set_page_load_timeout(30)
 
     # Подменяем webdriver detection
