@@ -47,3 +47,13 @@ jobs:
         run: |
           cd facebook-group-poster
           python post_to_facebook.py
+
+      - name: Upload debug artifacts (if failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fb-debug
+          path: |
+            /tmp/fb_*.png
+            /tmp/fb_*.html
+          if-no-files-found: ignore

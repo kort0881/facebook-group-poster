@@ -226,8 +226,8 @@ def post_to_facebook(driver, post_text, image_path, file_path):
     except Exception as e:
         log(f"❌ Не удалось открыть редактор поста: {e}")
         # Сохраняем скриншот для отладки
-        driver.save_screenshot("/tmp/fb_error_create_post.png")
-        log("📸 Скриншот сохранён: /tmp/fb_error_create_post.png")
+        driver.save_screenshot("fb_error_create_post.png")
+        log("📸 Скриншот сохранён: fb_error_create_post.png")
         return False
 
     # 2. Вводим текст
@@ -266,11 +266,11 @@ def post_to_facebook(driver, post_text, image_path, file_path):
         if not text_area:
             log("❌ Не найден текстовый редактор")
             # Сохраняем скриншот и HTML для отладки
-            driver.save_screenshot("/tmp/fb_error_textbox.png")
-            with open("/tmp/fb_page_source.html", "w", encoding="utf-8") as f:
+            driver.save_screenshot("fb_error_textbox.png")
+            with open("fb_page_source.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
-            log("📸 Скриншот: /tmp/fb_error_textbox.png")
-            log("📄 HTML страницы сохранён в /tmp/fb_page_source.html")
+            log("📸 Скриншот: fb_error_textbox.png")
+            log("📄 HTML страницы сохранён в fb_page_source.html")
             return False
 
         text_area.click()
@@ -373,7 +373,7 @@ def post_to_facebook(driver, post_text, image_path, file_path):
 
         if not publish_btn:
             log("❌ Не найдена кнопка публикации")
-            driver.save_screenshot("/tmp/fb_error_publish.png")
+            driver.save_screenshot("fb_error_publish.png")
             return False
 
         publish_btn.click()
@@ -383,7 +383,7 @@ def post_to_facebook(driver, post_text, image_path, file_path):
         return True
     except Exception as e:
         log(f"❌ Ошибка публикации: {e}")
-        driver.save_screenshot("/tmp/fb_error_publish.png")
+        driver.save_screenshot("fb_error_publish.png")
         return False
 
 
@@ -452,7 +452,7 @@ def main():
             random_sleep(2, 3)
             try:
                 log("📸 Скриншот результата...")
-                driver.save_screenshot("/tmp/fb_final_screenshot.png")
+                driver.save_screenshot("fb_final_screenshot.png")
             except Exception:
                 pass
             log("🧹 Закрываем браузер...")
