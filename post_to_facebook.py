@@ -238,19 +238,39 @@ def post_to_facebook(driver, post_text, image_path, file_path):
             "//div[@contenteditable='true']",
             "//div[@data-lexical-editor='true']",
             "//div[@class='notranslate']//p",
+            "//div[@aria-label[contains(.,'публикац') or contains(.,'post') or contains(.,'Write') or contains(.,'нового')]]",
+            "//div[@contenteditable='true' and @role='textbox']",
+            "//div[@contenteditable='true' and @spellcheck='true']",
+            "//*[@contenteditable='true']",
         ]
         text_area = None
         for sel in text_selectors:
             try:
                 text_area = wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
                 if text_area:
+                    log(f"✅ Найден редактор: {sel}")
                     break
             except Exception:
                 continue
 
         if not text_area:
+            # Пробуем найти любой видимый contenteditable
+            log("⚠️ Селекторы не сработали, ищем contenteditable элементы...")
+            all_editable = driver.find_elements(By.CSS_SELECTOR, "[contenteditable='true']")
+            for el in all_editable:
+                if el.is_displayed():
+                    text_area = el
+                    log("✅ Найден contenteditable элемент")
+                    break
+
+        if not text_area:
             log("❌ Не найден текстовый редактор")
+            # Сохраняем скриншот и HTML для отладки
             driver.save_screenshot("/tmp/fb_error_textbox.png")
+            with open("/tmp/fb_page_source.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            log("📸 Скриншот: /tmp/fb_error_textbox.png")
+            log("📄 HTML страницы сохранён в /tmp/fb_page_source.html")
             return False
 
         text_area.click()
