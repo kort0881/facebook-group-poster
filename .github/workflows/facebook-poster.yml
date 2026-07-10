@@ -54,6 +54,6 @@ jobs:
         with:
           name: fb-debug
           path: |
-            /tmp/fb_*.png
-            /tmp/fb_*.html
+            fb_*.png
+            fb_*.html
           if-no-files-found: ignore
