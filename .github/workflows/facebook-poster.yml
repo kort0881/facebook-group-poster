@@ -1,0 +1,49 @@
+name: Facebook Poster
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # каждые 6 часов
+  workflow_dispatch:         # ручной запуск
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: kort0881/proxy-auto-checker
+          path: proxy-auto-checker
+
+      - name: Checkout facebook poster
+        uses: actions/checkout@v4
+        with:
+          path: facebook-group-poster
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r facebook-group-poster/requirements.txt
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Copy key files from proxy-auto-checker
+        run: |
+          # Копируем results и checked из proxy-auto-checker
+          cp -r proxy-auto-checker/results facebook-group-poster/ 2>/dev/null || echo "⚠️ results/ не существует"
+          cp -r proxy-auto-checker/checked facebook-group-poster/ 2>/dev/null || echo "⚠️ checked/ не существует"
+          cp proxy-auto-checker/cover_public.jpg facebook-group-poster/ 2>/dev/null || echo "⚠️ cover_public.jpg не найден"
+          echo "📂 Содержимое facebook-group-poster:"
+          ls -la facebook-group-poster/
+
+      - name: Run Facebook poster
+        env:
+          FACEBOOK_COOKIES_B64: ${{ secrets.FACEBOOK_COOKIES_B64 }}
+        run: |
+          cd facebook-group-poster
+          python post_to_facebook.py
