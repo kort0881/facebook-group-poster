@@ -2,14 +2,14 @@ name: Facebook Poster
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # каждые 6 часов
-  workflow_dispatch:         # ручной запуск
+    - cron: '0 8 * * *'      # раз в день в 8:00 UTC (11:00 МСК)
+  workflow_dispatch:          # ручной запуск
 
 jobs:
   post:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout proxy-auto-checker (keys + cover)
         uses: actions/checkout@v4
         with:
           repository: kort0881/proxy-auto-checker
@@ -18,6 +18,7 @@ jobs:
       - name: Checkout facebook poster
         uses: actions/checkout@v4
         with:
+          repository: kort0881/facebook-group-poster
           path: facebook-group-poster
 
       - name: Set up Python
@@ -32,13 +33,12 @@ jobs:
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
 
-      - name: Copy key files from proxy-auto-checker
+      - name: Copy assets from proxy-auto-checker
         run: |
-          # Копируем results и checked из proxy-auto-checker
           cp -r proxy-auto-checker/results facebook-group-poster/ 2>/dev/null || echo "⚠️ results/ не существует"
           cp -r proxy-auto-checker/checked facebook-group-poster/ 2>/dev/null || echo "⚠️ checked/ не существует"
-          cp proxy-auto-checker/cover_public.jpg facebook-group-poster/ 2>/dev/null || echo "⚠️ cover_public.jpg не найден"
-          echo "📂 Содержимое facebook-group-poster:"
+          cp proxy-auto-checker/cover_public.jpg facebook-group-poster/ 2>/dev/null || echo "⚠️ cover_public.jpg не найден в proxy-auto-checker"
+          echo "📂 Состав facebook-group-poster:"
           ls -la facebook-group-poster/
 
       - name: Run Facebook poster
