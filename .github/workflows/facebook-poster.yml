@@ -29,9 +29,16 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r facebook-group-poster/requirements.txt
+          # Для совместимости: устанавливаем andi-совместимую версию chromedriver
+          pip install undetected-chromedriver==3.5.5
 
-      - name: Setup Chrome
-        uses: browser-actions/setup-chrome@v1
+      - name: Setup Chrome (full install)
+        run: |
+          # Chrome уже предустановлен на ubuntu-latest, но ChromeDriver отстаёт.
+          # Устанавливаем через google-chrome и chromedriver из undetected
+          google-chrome --version || true
+          # Удаляем старый chromedriver если есть
+          sudo apt-get remove -y chromedriver 2>/dev/null || true
 
       - name: Copy assets from proxy-auto-checker
         run: |

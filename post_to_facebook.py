@@ -115,7 +115,7 @@ def setup_browser():
     import logging
     logging.getLogger("undetected_chromedriver").setLevel(logging.WARNING)
 
-    driver = uc.Chrome(options=options)
+    driver = uc.Chrome(options=options, version_main=0)
     driver.set_page_load_timeout(30)
 
     # Подменяем webdriver detection
