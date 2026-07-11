@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Facebook Group Poster v2 — без Selenium, через чистый HTTP + куки.
-Используется запрос к Facebook GraphQL (тот же, что и фронтенд).
+Facebook Group Poster v3 — HTTP-only, GraphQL с полной структурой.
 """
 import os
 import sys
@@ -10,8 +9,8 @@ import base64
 import re
 import time
 import random
+import uuid
 from datetime import datetime
-from urllib.parse import quote, unquote
 
 import requests
 
@@ -24,7 +23,6 @@ from key_loader import (
 
 
 def load_keys():
-    """Загрузка ключей — идентично v1."""
     all_keys = []
     key_stats = None
     source_info = ""
@@ -51,12 +49,12 @@ def load_keys():
 
     return all_keys, key_stats, source_info
 
+
 # --- КОНФИГУРАЦИЯ ---
 DRY_RUN = os.environ.get("FB_DRY_RUN", "0") == "1"
 COOKIES_B64 = os.environ.get("FACEBOOK_COOKIES_B64", "")
 FB_GROUP_ID = os.environ.get("FB_GROUP_ID", "2478873955927710")
-FB_USER_ID = os.environ.get("FB_USER_ID", "")
-# FB_DTSG — anti-CSRF токен Facebook, можно извлечь из кук или страницы
+FB_USER_ID = os.environ.get("FB_USER_ID", "61591249905664")
 FB_DTSG = os.environ.get("FB_DTSG", "")
 
 WORK_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,27 +62,18 @@ RESULTS_FOLDER = os.path.join(WORK_DIR, "results")
 PREMIUM_FOLDER = os.path.join(RESULTS_FOLDER, "premium")
 COVER_PUBLIC = os.path.join(WORK_DIR, "cover_public.jpg")
 
-COOKIES_FILE = "/tmp/facebook_cookies.json"
-
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
 def load_cookies() -> list:
-    """Декодирует куки из B64. Возвращает список dict'ов (name, value, domain...)."""
     if not COOKIES_B64:
         log("❌ FACEBOOK_COOKIES_B64 не установлена")
         return []
 
     cookies_json = base64.b64decode(COOKIES_B64).decode("utf-8")
     cookies_list = json.loads(cookies_json)
-
-    # Сохраняем для requests
-    os.makedirs(os.path.dirname(COOKIES_FILE), exist_ok=True)
-    with open(COOKIES_FILE, "w") as f:
-        json.dump(cookies_list, f)
-
     log(f"✅ Загружено {len(cookies_list)} кук")
     return cookies_list
 
@@ -101,142 +90,178 @@ def build_post_text(total_keys, public_count):
     )
 
 
-def extract_fb_dtsg(session: requests.Session) -> str:
-    """Извлекает fb_dtsg / token из HTML страницы Facebook."""
+def extract_fb_dtsg_and_lsd(session: requests.Session) -> tuple:
+    """Извлекает fb_dtsg и lsd из HTML страницы Facebook."""
     try:
-        resp = session.get(
-            "https://www.facebook.com/",
-            timeout=15,
-        )
-        text = resp.text
-        log(f"📄 Размер HTML: {len(text)} символов")
+        resp = session.get("https://www.facebook.com/", timeout=15)
+        html = resp.text
+        log(f"📄 HTML: {len(html)} символов")
 
-        # ПРИОРИТЕТ: ищем fb_dtsg в HTML (там свежий токен на эту сессию)
-        # В современном Facebook: {"token":"abc123","token_type":1}
-        pattern1 = re.search(r'"fb_dtsg"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', text)
-        if pattern1:
-            token = pattern1.group(1)
-            log(f"✅ fb_dtsg из HTML (token): {token[:15]}...")
-            return token
+        fb_dtsg = ""
+        lsd = ""
 
-        # fb_dtsg": "abc123"
-        pattern2 = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', text)
-        if pattern2:
-            token = pattern2.group(1)
-            log(f"✅ fb_dtsg из HTML (plain): {token[:15]}...")
-            return token
+        # Ищем input[name="fb_dtsg"]
+        m = re.search(r'input[^>]*name\s*=\s*["\']fb_dtsg["\'][^>]*value\s*=\s*["\']([^"\']+)["\']', html)
+        if m:
+            fb_dtsg = m.group(1)
+            log(f"✅ fb_dtsg: {fb_dtsg[:15]}...")
 
-        # LSD token — второй по приоритету
-        pattern_lsd = re.search(r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', text)
-        if pattern_lsd:
-            token = pattern_lsd.group(1)
-            log(f"✅ LSD token: {token[:15]}...")
-            return token
+        # Ищем input[name="lsd"]
+        m = re.search(r'input[^>]*name\s*=\s*["\']lsd["\'][^>]*value\s*=\s*["\']([^"\']+)["\']', html)
+        if m:
+            lsd = m.group(1)
+            log(f"✅ lsd: {lsd[:15]}...")
 
-        # ServerJS init с fb_dtsg
-        pattern_sjs = re.search(r'ServerJS\s*\.\s*connectStatic\s*\(\s*\{[^}]*"fb_dtsg"\s*:\s*"([^"]+)"', text)
-        if pattern_sjs:
-            token = pattern_sjs.group(1)
-            log(f"✅ fb_dtsg из ServerJS: {token[:15]}...")
-            return token
+        # Fallback: JSON-блок fb_dtsg
+        if not fb_dtsg:
+            m = re.search(r'"fb_dtsg"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', html)
+            if m:
+                fb_dtsg = m.group(1)
+                log(f"✅ fb_dtsg (JSON): {fb_dtsg[:15]}...")
 
-        # Ищем в куках xs (низкий приоритет — может устареть)
-        for cookie in session.cookies:
-            if cookie.name == "xs":
-                token = unquote(cookie.value)
-                log(f"ℹ️ xs cookie (fallback): {token[:15]}...")
-                return token
+        # Fallback: xs cookie
+        if not fb_dtsg:
+            for cookie in session.cookies:
+                if cookie.name == "xs":
+                    from urllib.parse import unquote
+                    fb_dtsg = unquote(cookie.value)
+                    log(f"ℹ️ fb_dtsg из xs: {fb_dtsg[:15]}...")
 
-        log("❌ fb_dtsg/token не найден")
-        # Выведем контекст вокруг ВСЕХ ключевых слов
-        for keyword in ["dtsg", "DTSG", "LSD", "token", "__dtsg", "anti_csrf", "csrf", "req_token"]:
-            idx = text.find(keyword)
-            if idx > 0:
-                log(f"\n🔍 '{keyword}' контекст:")
-                # Выводим 300 символов до и после
-                start = max(0, idx-100)
-                end = min(len(text), idx+300)
-                snippet = text[start:end]
-                # Экранируем управляющие символы
-                snippet = snippet.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-                log(snippet)
-                break
-
-        # Если ничего не нашли, сохраним HTML в файл
-        try:
-            with open("fb_page_source.html", "w", encoding="utf-8") as f:
-                f.write(text[:50000])  # первые 50KB
-            log("💾 Первые 50KB HTML сохранены в fb_page_source.html")
-        except Exception:
-            pass
-        return ""
+        return fb_dtsg, lsd
     except Exception as e:
-        log(f"⚠️ Не удалось извлечь fb_dtsg: {e}")
-        return ""
+        log(f"⚠️ Ошибка извлечения токенов: {e}")
+        return FB_DTSG, ""
 
 
-def post_to_group_via_graphql(
-    session: requests.Session,
-    post_text: str,
-    file_path: str | None = None,
-) -> bool:
-    """
-    Публикация через внутренний Facebook GraphQL API.
-    Использует реальный doc_id: 36949139048065438 (ComposerStoryCreateMutation)
-    """
-    # 1. Получаем fb_dtsg (anti-CSRF)
-    fb_dtsg = extract_fb_dtsg(session)
-    if not fb_dtsg:
-        fb_dtsg = FB_DTSG
+def gen_attribution_id():
+    ts = int(time.time() * 1000)
+    rnd = random.randint(100000, 999999)
+    return f"CometGroupDiscussionRoot.react,comet.group,via_cold_start,{ts},{rnd},2361831622,,"
 
-    log(f"🔑 fb_dtsg: {'найден' if fb_dtsg else 'не найден'}")
 
-    # Пробуем нетто-токен (если есть в куках)
-    for cookie in session.cookies:
-        if cookie.name == "c_user":
-            FB_USER_ID_ENV = cookie.value
-            break
-    else:
-        FB_USER_ID_ENV = FB_USER_ID or "61591249905664"
+def build_graphql_payload(post_text: str, fb_dtsg: str, lsd: str) -> dict:
+    """Формирует полный payload для GraphQL (ComposerStoryCreateMutation)."""
+    composer_session_id = str(uuid.uuid4())
 
-    DOC_ID = "36949139048065438"
-    FB_FRIENDLY_NAME = "ComposerStoryCreateMutation"
-
-    # Формируем variables в точности как Facebook фронтенд
     variables = {
         "input": {
-            "composer_entry_point": "group",
+            "composer_entry_point": "inline_composer",
             "composer_source_surface": "group",
             "composer_type": "group",
+            "logging": {
+                "composer_session_id": composer_session_id,
+            },
             "source": "WWW",
             "message": {
+                "ranges": [],
                 "text": post_text,
             },
-            "audience": {
-                "to_id": FB_GROUP_ID,
+            "with_tags_ids": None,
+            "inline_activities": [],
+            "text_format_preset_id": "0",
+            "group_flair": {"flair_id": None},
+            "attachments": [],  # без фото
+            "composed_text": {
+                "block_data": ["{}"],
+                "block_depths": [0],
+                "block_types": [0],
+                "blocks": [""],
+                "entities": ["[]"],
+                "entity_map": "{}",
+                "inline_styles": ["[]"],
             },
-            "actor_id": FB_USER_ID_ENV,
+            "navigation_data": {
+                "attribution_id_v2": gen_attribution_id(),
+            },
+            "tracking": [None],
+            "event_share_metadata": {"surface": "newsfeed"},
+            "audience": {"to_id": FB_GROUP_ID},
+            "actor_id": FB_USER_ID,
             "client_mutation_id": str(int(time.time() * 1000)),
-            "composer_session_id": f"composer_{int(time.time())}",
-            "navigation_store_id": f"nav_{int(time.time())}",
-        }
+        },
+        "feedLocation": "GROUP",
+        "feedbackSource": 0,
+        "focusCommentID": None,
+        "gridMediaWidth": None,
+        "groupID": None,
+        "scale": 1,
+        "privacySelectorRenderLocation": "COMET_STREAM",
+        "checkPhotosToReelsUpsellEligibility": False,
+        "referringStoryRenderLocation": None,
+        "renderLocation": "group",
+        "useDefaultActor": False,
+        "inviteShortLinkKey": None,
+        "isFeed": False,
+        "isFundraiser": False,
+        "isFunFactPost": False,
+        "isGroup": True,
+        "isEvent": False,
+        "isTimeline": False,
+        "isSocialLearning": False,
+        "isPageNewsFeed": False,
+        "isProfileReviews": False,
+        "isWorkSharedDraft": False,
+        "__relay_internal__pv__CometUFIShareActionMigrationrelayprovider": True,
+        "__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider": False,
+        "__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider": False,
+        "__relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider": True,
+        "__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider": "AUTO_TRANSLATE",
+        "__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider": False,
+        "__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider": False,
+        "__relay_internal__pv__IsWorkUserrelayprovider": False,
+        "__relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider": False,
+        "__relay_internal__pv__CometUFISingleLineUFIrelayprovider": True,
+        "__relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider": False,
+        "__relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider": True,
+        "__relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider": False,
+        "__relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider": False,
+        "__relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider": True,
+        "__relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider": True,
+        "__relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider": False,
+        "__relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider": False,
+        "__relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider": False,
+        "__relay_internal__pv__IsMergQAPollsrelayprovider": False,
+        "__relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider": True,
+        "__relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider": True,
+        "__relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider": False,
+        "__relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider": True,
+        "__relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider": 206,
+        "__relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider": False,
+        "__relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider": True,
+        "__relay_internal__pv__groups_comet_use_glvrelayprovider": False,
+        "__relay_internal__pv__GHLShouldChangeSponsoredAuctionDistanceFieldNamerelayprovider": False,
+        "__relay_internal__pv__GHLShouldUseSponsoredAuctionLabelFieldNameV1relayprovider": False,
+        "__relay_internal__pv__GHLShouldUseSponsoredAuctionLabelFieldNameV2relayprovider": False,
     }
 
     payload = {
-        "av": FB_USER_ID_ENV,
-        "__user": FB_USER_ID_ENV,
+        "av": FB_USER_ID,
+        "__user": FB_USER_ID,
         "__a": "1",
-        "__req": str(random.randint(1, 20)),
+        "__req": str(random.randint(1, 50)),
         "__hs": "19861.HYP:comet_pkg.2.1.1.1.0",
         "__comet_req": "1",
         "fb_api_caller_class": "RelayModern",
-        "fb_api_req_friendly_name": FB_FRIENDLY_NAME,
+        "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
         "variables": json.dumps(variables),
-        "doc_id": DOC_ID,
+        "doc_id": "36949139048065438",
         "fb_dtsg": fb_dtsg,
+        "lsd": lsd,
         "jazoest": "2" + str(random.randint(1000, 9999)),
         "dpr": "2",
     }
+
+    return payload
+
+
+def publish_post(session: requests.Session, post_text: str) -> bool:
+    fb_dtsg, lsd = extract_fb_dtsg_and_lsd(session)
+
+    if not fb_dtsg:
+        log("❌ fb_dtsg не найден")
+        return False
+
+    payload = build_graphql_payload(post_text, fb_dtsg, lsd)
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
@@ -248,11 +273,14 @@ def post_to_group_via_graphql(
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Dest": "empty",
-        "X-FB-Friendly-Name": FB_FRIENDLY_NAME,
-        "X-FB-LSD": fb_dtsg,
+        "x-fb-friendly-name": "ComposerStoryCreateMutation",
     }
 
-    log(f"📤 GraphQL (doc_id={DOC_ID})...")
+    if lsd:
+        headers["x-fb-lsd"] = lsd
+
+    log(f"📤 GraphQL: doc_id=36949139048065438")
+
     try:
         resp = session.post(
             "https://www.facebook.com/api/graphql/",
@@ -260,68 +288,59 @@ def post_to_group_via_graphql(
             headers=headers,
             timeout=30,
         )
+
+        body = resp.text
+        if body.startswith("for (;;);"):
+            body = body[9:]
+
         log(f"📥 HTTP {resp.status_code}")
-        log(f"📄 Тело: {resp.text[:2000]}")
+        log(f"📄 Тело: {body[:1500]}")
 
-        if resp.status_code == 200:
-            # Убираем защитный префикс for (;;);
-            body = resp.text
-            if body.startswith("for (;;);"):
-                body = body[9:]
-
-            try:
-                data = json.loads(body)
-
-                # Проверяем на ошибки
-                if "error" in data:
-                    error_code = data.get("error")
-                    error_summary = data.get("errorSummary", "")
-                    error_desc = data.get("errorDescription", "")
-                    log(f"⚠️ Facebook error {error_code}: {error_summary} — {error_desc}")
-
-                    if error_code == 1357032:
-                        log("💡 fb_dtsg невалидный — куки протухли или нужно обновить")
-                    return False
-
-                # Парсим post_id
-                post_id = None
-                try:
-                    post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
-                except Exception:
-                    pass
-                if not post_id:
-                    try:
-                        post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("id")
-                    except Exception:
-                        pass
-                if not post_id:
-                    post_id = re.search(r'"post_id"\s*:\s*"(\d+)"', resp.text)
-
-                if post_id:
-                    post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
-                    log(f"🔗 Пост: {post_url}")
-                    return True
-
-                # Если в ответе есть story_create — успех
-                if "story_create" in resp.text:
-                    # Ищем любой ID в ответе
-                    id_match = re.search(r'"id"\s*:\s*"(\d+)"', resp.text)
-                    if id_match:
-                        post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{id_match.group(1)}"
-                        log(f"🔗 Пост: {post_url}")
-                        return True
-                    log("✅ Пост создан (story_create в ответе)")
-                    return True
-
-                log("⚠️ Ответ не содержит story_create")
-                return False
-
-            except json.JSONDecodeError:
-                log("⚠️ Ответ не JSON")
-                return False
-        else:
+        if resp.status_code != 200:
             log(f"❌ HTTP {resp.status_code}")
             return False
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            log("⚠️ Ответ не JSON")
+            return False
+
+        if "error" in data:
+            err = data["error"]
+            summary = data.get("errorSummary", "")
+            desc = data.get("errorDescription", "")
+            log(f"⚠️ Facebook error {err}: {summary} — {desc}")
+            return False
+
+        # Парсим post_id
+        post_id = None
+        try:
+            post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
+        except Exception:
+            pass
+        if not post_id:
+            try:
+                post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("id")
+            except Exception:
+                pass
+        if not post_id:
+            m = re.search(r'"post_id"\s*:\s*"(\d+)"', body)
+            if m:
+                post_id = m.group(1)
+
+        if post_id:
+            url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
+            log(f"🔗 Пост: {url}")
+            return True
+
+        if "story_create" in body:
+            log("✅ Пост создан (story_create)")
+            return True
+
+        log("⚠️ Неизвестный ответ, проверьте тело")
+        return False
+
     except Exception as e:
         log(f"❌ Исключение: {e}")
         return False
@@ -329,7 +348,7 @@ def post_to_group_via_graphql(
 
 def main():
     log("=" * 70)
-    log("📘 FACEBOOK GROUP POSTER v2 (HTTP-only)")
+    log("📘 FACEBOOK GROUP POSTER v3 (GraphQL + lsd)")
     log("=" * 70)
 
     if DRY_RUN:
@@ -350,12 +369,12 @@ def main():
     log(f"📦 Всего ключей: {total_keys}")
     log(f"📂 Источник: {source_info}")
 
-    # 2. Создаём публичный файл (на будущее — прикреплять не можем через HTTP)
+    # 2. Создаём публичный файл
     log("\n📄 Создание публичного файла...")
     public_file, public_count = create_public_file(all_keys, key_stats)
     log(f"✅ Создан файл: {public_file} ({public_count} ключей)")
 
-    # 3. Формируем текст
+    # 3. Текст поста
     post_text = build_post_text(total_keys, public_count)
     log(f"\n📝 Текст поста:\n{post_text}\n")
 
@@ -369,33 +388,29 @@ def main():
         return 1
 
     session = requests.Session()
-
-    # Ставим куки в session (куки — массив объектов с name/value/domain)
     for cookie in cookies_list:
         name = cookie.get("name", "")
         value = cookie.get("value", "")
         domain = cookie.get("domain", ".facebook.com")
         session.cookies.set(name, value, domain=domain)
 
-    # Устанавливаем домен по умолчанию
     log("🌐 Инициализация сессии...")
     try:
         resp = session.get("https://www.facebook.com/", timeout=15)
-        log(f"✅ Facebook загружен: HTTP {resp.status_code}")
+        log(f"✅ Facebook: HTTP {resp.status_code}")
     except Exception as e:
         log(f"❌ Не удалось загрузить facebook.com: {e}")
         return 1
 
-    # 5. Пробуем опубликовать (AJAX + GraphQL внутри)
+    # 5. Публикуем
     log("\n🚀 Публикация...")
-    success = post_to_group_via_graphql(session, post_text, public_file)
+    success = publish_post(session, post_text)
 
     if success:
         log("\n✅ Пост успешно опубликован!")
         return 0
     else:
-        log("\n❌ Не удалось опубликовать пост ни одним методом")
-        log("💡 Нужно обновить куки Facebook или получить fb_dtsg вручную")
+        log("\n❌ Не удалось опубликовать пост")
         return 1
 
 
