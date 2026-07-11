@@ -147,12 +147,13 @@ def extract_fb_dtsg(session: requests.Session) -> str:
                 log(f"ℹ️ xs cookie (fallback): {token[:15]}...")
                 return token
 
-        log("❌ fb_dtsg не найден ни одним способом")
-        # Выведем контекст вокруг "dtsg" для отладки
-        for keyword in ["dtsg", "DTSG", "LSD", "token", "__dtsg"]:
+        log("❌ fb_dtsg/token не найден")
+        # Выведем контекст вокруг всех ключевых слов
+        for keyword in ["dtsg", "DTSG", "LSD", "token", "__dtsg", "anti_csrf", "csrf", "req_token"]:
             idx = text.find(keyword)
             if idx > 0:
-                log(f"🔍 '{keyword}' контекст: ...{text[max(0,idx-50):idx+200]}...")
+                log(f"\n🔍 '{keyword}' контекст:")
+                log(f"...{text[max(0,idx-80):idx+250]}...")
                 break
         return ""
     except Exception as e:
