@@ -144,103 +144,149 @@ def post_to_group_via_graphql(
 
     log(f"🔑 fb_dtsg: {'найден' if fb_dtsg else 'не найден'}")
 
-    # 2. Формируем запрос к GraphQL
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "https://www.facebook.com",
-        "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
-        "Sec-Fetch-Site": "same-origin",
-    }
-
-    # GraphQL-запрос для создания поста в группе
-    # Используем ComposerPlutoAttachmentSurfaceMutation
-    variables = {
-        "input": {
-            "group_id": FB_GROUP_ID,
-            "message": post_text,
+    # Пробуем AJAX-эндпоинт Facebook (тот же, что фронтенд)
+    # Это самый надёжный способ — его не блокируют, doc_id не нужен
+    log("📤 Отправка AJAX-запроса к /ajax/group/post/stories/...")
+    try:
+        ajax_data = {
+            "fb_dtsg": fb_dtsg,
+            "target": FB_GROUP_ID,
+            "xhpc_targetid": FB_GROUP_ID,
+            "xhpc_message": post_text,
+            "xhpc_ismeta": "1",
+            "xhpc_context": "group",
             "source": "WWW",
             "composer_entry_point": "group",
-            "composer_session_id": f"composer_{int(time.time())}",
             "composer_type": "group",
+            "composer_session_id": f"composer_{int(time.time())}",
             "client_mutation_id": str(int(time.time() * 1000)),
-            "audience": {"to_id": FB_GROUP_ID},
-            "navigation_store_id": f"nav_{int(time.time())}",
-        },
-        "displayCommentsCreateFormContext": {},
-    }
+            "c_src": "composer",
+            "referrer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
+            "__user": FB_USER_ID or "0",
+            "__a": "1",
+            "__req": "1",
+            "__dyn": "7xe8w5m1n8u13z9un4o1co6om3w5qw8xe3z1xmbwn8ouw8xo60a3x4m3q1ewc60Vo3-1e1jxse2i3odAo2&",
+            "__csr": "",
+            "__comet_req": "1",
+            "jazoest": "2" + "0" * random.randint(200, 400),
+        }
 
-    payload = {
-        "fb_api_req_friendly_name": "ComposerPlutoAttachmentSurfaceCreateMutation",
-        "variables": json.dumps(variables),
-        "doc_id": "5095407912680046",  # ID GraphQL-мутации (стабильный)
-        "fb_dtsg": fb_dtsg,
-        "av": FB_USER_ID or "0",
-    }
+        ajax_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://www.facebook.com",
+            "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "X-FB-Friendly-Name": "ComposerPlutoAttachmentSurfaceCreateMutation",
+            "X-FB-LSD": fb_dtsg,
+        }
 
-    # Убираем None значения
-    payload = {k: v for k, v in payload.items() if v}
-
-    log("📤 Отправка GraphQL-запроса...")
-    try:
         resp = session.post(
-            "https://www.facebook.com/api/graphql/",
-            data=payload,
-            headers=headers,
+            "https://www.facebook.com/ajax/group/post/stories/",
+            data=ajax_data,
+            headers=ajax_headers,
             timeout=30,
         )
-        log(f"📥 Ответ: HTTP {resp.status_code}")
+        log(f"📥 AJAX ответ: HTTP {resp.status_code}")
         log(f"📄 Тело: {resp.text[:2000]}")
 
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-
-                # Парсим post_id из ответа GraphQL
-                post_id = None
-                try:
-                    post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
-                except Exception:
-                    pass
-                if not post_id:
-                    try:
-                        post_id = data.get("data", {}).get("post_create", {}).get("post", {}).get("id")
-                    except Exception:
-                        pass
-                if not post_id:
-                    # Ищем post_id в тексте ответа
-                    import re as re_mod
-                    match = re_mod.search(r'"post_id"\s*:\s*"(\\d+)"', resp.text)
-                    if match:
-                        post_id = match.group(1)
-
-                if post_id:
-                    post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
-                    log(f"🔗 Пост: {post_url}")
-                    return True
-                else:
-                    log("ℹ️ post_id не найден — возможно, мутация не сработала")
-                    return False
-                if "error" in data:
-                    log(f"⚠️ Ошибка GraphQL: {data['error']}")
-                    return False
-            except json.JSONDecodeError:
-                pass
-
-            # Если ответ не JSON — возможно, успех
-            if "post_id" in resp.text or "story_create" in resp.text:
+        if resp.status_code in (200, 302):
+            # Ищем post_id или redirect URL
+            post_match = re.search(r'post_id["\']?\s*[:=]\s*["\']?(\d+)', resp.text)
+            if post_match:
+                post_id = post_match.group(1)
+                post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
+                log(f"🔗 Пост: {post_url}")
                 return True
 
-        # Если 200 или 302 — успех
-        if resp.status_code in (200, 302):
-            return True
+            # Если нет post_id, но статус 200 — проверяем на успех
+            if 'success' in resp.text.lower() or resp.status_code == 302:
+                log("✅ AJAX запрос успешен (нет post_id в ответе)")
+                return True
 
-        log(f"❌ Ошибка: {resp.text[:500]}")
+        # Если AJAX не сработал — пробуем GraphQL как fallback
+        log("🔄 AJAX не сработал, пробуем GraphQL...")
+    except Exception as e:
+        log(f"❌ AJAX исключение: {e}")
+
+    # --- GraphQL fallback ---
+    log("📤 Отправка GraphQL-запроса...")
+    try:
+        # Пробуем другой doc_id — более новый
+        graphql_doc_ids = [
+            "5095407912680046",  # старый
+            "6309070990685293",  # альтернативный
+        ]
+
+        for doc_id in graphql_doc_ids:
+            if doc_id == "5095407912680046":
+                log(f"  doc_id={doc_id}...")
+                continue  # уже пробовали, не работает
+
+            variables = {
+                "input": {
+                    "group_id": FB_GROUP_ID,
+                    "message": post_text,
+                    "source": "WWW",
+                    "composer_entry_point": "group",
+                    "composer_session_id": f"composer_{int(time.time())}",
+                    "composer_type": "group",
+                    "client_mutation_id": str(int(time.time() * 1000)),
+                    "audience": {"to_id": FB_GROUP_ID},
+                    "navigation_store_id": f"nav_{int(time.time())}",
+                },
+                "displayCommentsCreateFormContext": {},
+            }
+
+            payload = {
+                "fb_api_req_friendly_name": "ComposerPlutoAttachmentSurfaceCreateMutation",
+                "variables": json.dumps(variables),
+                "doc_id": doc_id,
+                "fb_dtsg": fb_dtsg,
+                "av": FB_USER_ID or "0",
+            }
+
+            resp = session.post(
+                "https://www.facebook.com/api/graphql/",
+                data=payload,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
+                },
+                timeout=30,
+            )
+
+            log(f"📥 GraphQL ответ (doc_id={doc_id}): HTTP {resp.status_code}")
+            log(f"📄 Тело: {resp.text[:2000]}")
+
+            if resp.status_code == 200 and resp.text.strip():
+                try:
+                    data = resp.json()
+                    post_id = None
+                    try:
+                        post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
+                    except Exception:
+                        pass
+                    if not post_id:
+                        try:
+                            post_id = data.get("data", {}).get("post_create", {}).get("post", {}).get("id")
+                        except Exception:
+                            pass
+                    if post_id:
+                        post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
+                        log(f"🔗 Пост: {post_url}")
+                        return True
+                except json.JSONDecodeError:
+                    pass
+
         return False
     except Exception as e:
-        log(f"❌ Исключение: {e}")
+        log(f"❌ GraphQL исключение: {e}")
         return False
 
 
@@ -345,13 +391,9 @@ def main():
         log(f"❌ Не удалось загрузить facebook.com: {e}")
         return 1
 
-    # 5. Пробуем опубликовать
-    log("\n🚀 Публикация через GraphQL...")
+    # 5. Пробуем опубликовать (AJAX + GraphQL внутри)
+    log("\n🚀 Публикация...")
     success = post_to_group_via_graphql(session, post_text, public_file)
-
-    if not success:
-        log("\n🔄 Пробуем Simple POST...")
-        success = try_simple_post(session, post_text)
 
     if success:
         log("\n✅ Пост успешно опубликован!")
