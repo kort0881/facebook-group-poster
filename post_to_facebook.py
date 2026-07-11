@@ -11,7 +11,7 @@ import re
 import time
 import random
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import requests
 
@@ -125,11 +125,13 @@ def extract_fb_dtsg(session: requests.Session) -> str:
             log(f"✅ fb_dtsg найден (plain): {token[:10]}...")
             return token
 
-        # Ищем в куках xs (это тоже token)
+        # Ищем в куках xs (это тоже token, но нужно декодировать)
         for cookie in session.cookies:
             if cookie.name == "xs":
-                log(f"✅ fb_dtsg из xs cookie: {cookie.value[:10]}...")
-                return cookie.value
+                token = unquote(cookie.value)
+                log(f"✅ fb_dtsg из xs cookie (raw): {cookie.value[:15]}...")
+                log(f"✅ fb_dtsg из xs cookie (decoded): {token[:15]}...")
+                return token
 
         # Последний шанс — ищем LSD token (он часто совпадает с fb_dtsg)
         pattern_lsd = re.search(r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', text)
