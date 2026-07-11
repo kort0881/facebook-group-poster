@@ -196,8 +196,32 @@ def post_to_group_via_graphql(
         if resp.status_code == 200:
             try:
                 data = resp.json()
-                log(f"📄 Ответ: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
-                if data.get("data", {}).get("post_create"):
+
+                # Парсим post_id из ответа GraphQL
+                post_id = None
+                try:
+                    post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
+                except Exception:
+                    pass
+                if not post_id:
+                    try:
+                        post_id = data.get("data", {}).get("post_create", {}).get("post", {}).get("id")
+                    except Exception:
+                        pass
+                if not post_id:
+                    # Ищем post_id в тексте ответа
+                    import re as re_mod
+                    match = re_mod.search(r'"post_id"\s*:\s*"(\\d+)"', resp.text)
+                    if match:
+                        post_id = match.group(1)
+
+                if post_id:
+                    post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
+                    log(f"🔗 Пост: {post_url}")
+                else:
+                    log("ℹ️ post_id не найден в ответе")
+
+                if data.get("data", {}).get("post_create") or data.get("data", {}).get("story_create"):
                     return True
                 if "error" in data:
                     log(f"⚠️ Ошибка GraphQL: {data['error']}")
