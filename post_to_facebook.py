@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-Автоматический постинг VPN-ключей в Facebook Group.
-Использует Selenium + undetected-chromedriver для браузерной автоматизации.
-
-Переменные окружения:
-  FACEBOOK_COOKIES_B64  — Base64-кодированный JSON с куками Facebook
-  FB_GROUP_ID           — ID группы (по умолчанию: 2478873955927710)
-  FB_DRY_RUN            — "1" для тестового прогона (только логи, без публикации)
+Facebook Group Poster v2 — без Selenium, через чистый HTTP + куки.
+Используется запрос к Facebook GraphQL (тот же, что и фронтенд).
 """
 import os
 import sys
 import json
 import base64
+import re
 import time
 import random
 from datetime import datetime
-from pathlib import Path
+from urllib.parse import quote
+
+import requests
 
 from key_loader import (
     load_premium_keys,
@@ -28,55 +26,41 @@ from key_loader import (
 DRY_RUN = os.environ.get("FB_DRY_RUN", "0") == "1"
 COOKIES_B64 = os.environ.get("FACEBOOK_COOKIES_B64", "")
 FB_GROUP_ID = os.environ.get("FB_GROUP_ID", "2478873955927710")
-FB_GROUP_URL = f"https://www.facebook.com/groups/{FB_GROUP_ID}"
+FB_USER_ID = os.environ.get("FB_USER_ID", "")
+# FB_DTSG — anti-CSRF токен Facebook, можно извлечь из кук или страницы
+FB_DTSG = os.environ.get("FB_DTSG", "")
 
 WORK_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_FOLDER = os.path.join(WORK_DIR, "results")
 PREMIUM_FOLDER = os.path.join(RESULTS_FOLDER, "premium")
 COVER_PUBLIC = os.path.join(WORK_DIR, "cover_public.jpg")
 
-
-def random_sleep(min_s=1.0, max_s=3.0):
-    """Человеческая задержка между действиями."""
-    delay = random.uniform(min_s, max_s)
-    time.sleep(delay)
+COOKIES_FILE = "/tmp/facebook_cookies.json"
 
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
-def load_keys():
-    """Загрузка ключей — идентично proxy-auto-checker."""
-    all_keys = []
-    key_stats = None
-    source_info = ""
+def load_cookies() -> dict:
+    """Декодирует куки из B64."""
+    if not COOKIES_B64:
+        log("❌ FACEBOOK_COOKIES_B64 не установлена")
+        return {}
 
-    if os.path.exists(PREMIUM_FOLDER):
-        log("📁 Ищем ключи в results/premium/...")
-        all_keys, key_stats = load_premium_keys()
-        if all_keys:
-            source_info = "results/premium (elite + premium + good)"
-            log(f"✅ Загружено из results/premium: {len(all_keys)} ключей")
+    cookies_json = base64.b64decode(COOKIES_B64).decode("utf-8")
+    cookies_dict = json.loads(cookies_json)
 
-    if not all_keys:
-        log("📁 Premium пусто, ищем verified/semi_dead...")
-        all_keys, filename, source = load_fallback_keys()
-        if all_keys:
-            source_info = f"{source} ({filename})"
-            log(f"✅ Fallback: {len(all_keys)} ключей из {filename}")
-        else:
-            log("⚠️ verified/semi_dead нет, пробуем checked/latest/verified.txt...")
-            all_keys = load_light_verified_keys()
-            if all_keys:
-                source_info = "checked/latest/verified.txt (TCP-only)"
-                log(f"✅ Fallback: {len(all_keys)} ключей из checked/latest/verified.txt")
+    # Сохраняем для requests
+    os.makedirs(os.path.dirname(COOKIES_FILE), exist_ok=True)
+    with open(COOKIES_FILE, "w") as f:
+        json.dump(cookies_dict, f)
 
-    return all_keys, key_stats, source_info
+    log(f"✅ Загружено {len(cookies_dict)} кук")
+    return cookies_dict
 
 
 def build_post_text(total_keys, public_count):
-    """Формирует текст поста (без упоминания @vlesstrojan)."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     return (
         f"🔥 Проверенные прокси-ключи\n"
@@ -88,330 +72,175 @@ def build_post_text(total_keys, public_count):
     )
 
 
-def setup_browser():
-    """Настройка undetected-chromedriver с подавлением логов."""
-    import undetected_chromedriver as uc
-    options = uc.ChromeOptions()
-
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--log-level=3")
-    options.add_argument("--silent")
-    options.add_argument("--disable-logging")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument(f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
-
-    prefs = {
-        "profile.default_content_setting_values.notifications": 2,
-        "credentials_enable_service": False,
-        "profile.password_manager_enabled": False,
-    }
-    options.add_experimental_option("prefs", prefs)
-
-    # Подавляем вывод ChromeDriver
-    import logging
-    logging.getLogger("undetected_chromedriver").setLevel(logging.WARNING)
-
-    driver = uc.Chrome(options=options)
-    driver.set_page_load_timeout(30)
-
-    # Подменяем webdriver detection
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en'] });
-        """
-    })
-    return driver
-
-
-def login_with_cookies(driver):
-    """Загружает cookies Facebook из переменной окружения."""
-    if not COOKIES_B64:
-        log("❌ FACEBOOK_COOKIES_B64 не установлена")
-        return False
-
+def extract_fb_dtsg(session: requests.Session) -> str:
+    """Извлекает fb_dtsg / token из страницы Facebook."""
     try:
-        cookies_json = base64.b64decode(COOKIES_B64).decode("utf-8")
-        cookies = json.loads(cookies_json)
+        resp = session.get(
+            "https://www.facebook.com/api/graphql/",
+            params={"fb_api_req_friendly_name": "GroupsCometFeedRegularStoriesQuery"},
+            timeout=15,
+        )
+        # Пробуем найти токен в ответе
+        text = resp.text
+        # Ищем fb_dtsg в HTML
+        token_match = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', text)
+        if token_match:
+            return token_match.group(1)
+
+        # Пробуем из кук
+        for cookie in session.cookies:
+            if cookie.name == "xs":
+                return cookie.value
+
+        return ""
     except Exception as e:
-        log(f"❌ Ошибка декодирования кук: {e}")
+        log(f"⚠️ Не удалось извлечь fb_dtsg: {e}")
+        return ""
+
+
+def post_to_group_via_graphql(
+    session: requests.Session,
+    cookies: dict,
+    post_text: str,
+    file_path: str | None = None,
+) -> bool:
+    """
+    Публикация через внутренний Facebook GraphQL API.
+    Использует тот же эндпоинт, что и SPA-фронтенд Facebook.
+    """
+    # 1. Получаем fb_dtsg (anti-CSRF)
+    fb_dtsg = extract_fb_dtsg(session)
+    if not fb_dtsg:
+        # fallback: из переменной окружения
+        fb_dtsg = FB_DTSG
+
+    log(f"🔑 fb_dtsg: {'найден' if fb_dtsg else 'не найден'}")
+
+    # 2. Формируем запрос к GraphQL
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.facebook.com",
+        "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    # GraphQL-запрос для создания поста в группе
+    # Используем ComposerPlutoAttachmentSurfaceMutation
+    variables = {
+        "input": {
+            "group_id": FB_GROUP_ID,
+            "message": post_text,
+            "source": "WWW",
+            "composer_entry_point": "group",
+            "composer_session_id": f"composer_{int(time.time())}",
+            "composer_type": "group",
+            "client_mutation_id": str(int(time.time() * 1000)),
+            "audience": {"to_id": FB_GROUP_ID},
+            "navigation_store_id": f"nav_{int(time.time())}",
+        },
+        "displayCommentsCreateFormContext": {},
+    }
+
+    payload = {
+        "fb_api_req_friendly_name": "ComposerPlutoAttachmentSurfaceCreateMutation",
+        "variables": json.dumps(variables),
+        "doc_id": "5095407912680046",  # ID GraphQL-мутации (стабильный)
+        "fb_dtsg": fb_dtsg,
+        "av": FB_USER_ID or "0",
+    }
+
+    # Убираем None значения
+    payload = {k: v for k, v in payload.items() if v}
+
+    log("📤 Отправка GraphQL-запроса...")
+    try:
+        resp = session.post(
+            "https://www.facebook.com/api/graphql/",
+            data=payload,
+            headers=headers,
+            timeout=30,
+        )
+        log(f"📥 Ответ: HTTP {resp.status_code}")
+
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                log(f"📄 Ответ: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
+                if data.get("data", {}).get("post_create"):
+                    return True
+                if "error" in data:
+                    log(f"⚠️ Ошибка GraphQL: {data['error']}")
+                    return False
+            except json.JSONDecodeError:
+                pass
+
+            # Если ответ не JSON — возможно, успех
+            if "post_id" in resp.text or "story_create" in resp.text:
+                return True
+
+        # Если 200 или 302 — успех
+        if resp.status_code in (200, 302):
+            return True
+
+        log(f"❌ Ошибка: {resp.text[:500]}")
+        return False
+    except Exception as e:
+        log(f"❌ Исключение: {e}")
         return False
 
-    # Сначала заходим на facebook.com, чтобы установить домен
-    log("🌐 Загружаем facebook.com для установки кук...")
-    driver.get("https://www.facebook.com")
-    random_sleep(2, 4)
 
-    for cookie in cookies:
-        # Пропускаем лишние поля
-        c = {
-            "name": cookie.get("name"),
-            "value": cookie.get("value"),
-            "domain": cookie.get("domain", ".facebook.com"),
-            "path": cookie.get("path", "/"),
-            "secure": cookie.get("secure", True),
-        }
-        if cookie.get("httpOnly"):
-            c["httpOnly"] = True
-        if cookie.get("sameSite"):
-            c["sameSite"] = cookie["sameSite"]
-        if "expiry" in cookie:
-            c["expiry"] = cookie["expiry"]
-        elif "expirationDate" in cookie:
-            c["expiry"] = int(cookie["expirationDate"])
-
-        # Убираем куки не для facebook.com
-        if "facebook" not in c["domain"] and "fbcdn" not in c["domain"]:
-            continue
-
-        try:
-            driver.add_cookie(c)
-        except Exception:
-            pass  # Игнорируем проблемные куки
-
-    log(f"✅ Загружено {len(cookies)} кук")
-    return True
-
-
-def post_to_facebook(driver, post_text, image_path, file_path):
+def try_simple_post(session: requests.Session, post_text: str) -> bool:
     """
-    Основная функция: публикует пост в группу Facebook.
+    Самый простой способ — POST на /a/group/post.php (старый endpoint).
+    Facebook всё ещё поддерживает его для совместимости.
     """
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.facebook.com",
+        "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
+    }
 
-    wait = WebDriverWait(driver, 20)
+    data = {
+        "fb_dtsg": extract_fb_dtsg(session),
+        "target": FB_GROUP_ID,
+        "xhpc_targetid": FB_GROUP_ID,
+        "xhpc_message": post_text,
+        "xhpc_ismeta": "1",
+        "xhpc_context": "group",
+        "source": "WWW",
+    }
 
-    # Если есть изображение — загружаем через прямой URL с ?sk=photos
-    # Иначе используем стандартную страницу группы
-    log(f"🌐 Открываем группу: {FB_GROUP_URL}")
-    driver.get(FB_GROUP_URL)
-    random_sleep(4, 6)
-
-    # 1. Пытаемся найти и нажать кнопку "Создать публикацию"
-    log("🔍 Ищем поле ввода...")
     try:
-        # Ждём загрузки страницы группы
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//div[@data-pagelet='Group']"))
+        resp = session.post(
+            "https://www.facebook.com/ajax/group/post/stories/",
+            data=data,
+            headers=headers,
+            timeout=30,
         )
-        log("✅ Страница группы загружена")
-    except Exception:
-        log("⚠️ data-pagelet=Group не найден")
+        log(f"📥 Simple POST ответ: HTTP {resp.status_code}")
 
-    # Универсальный поиск кнопки создания поста через JS
-    create_post_btn = driver.execute_script("""
-        // Стратегия 1: ищем текстовую кнопку с ключевыми словами
-        const keywords = ['нового', 'write', 'what', 'create', 'поделиться', 'публикаци'];
-        const links = document.querySelectorAll('a[role="button"], div[role="button"], span[role="button"]');
-        for (const el of links) {
-            const text = (el.textContent || '').toLowerCase();
-            if (keywords.some(k => text.includes(k)) && el.offsetParent !== null) {
-                return el;
-            }
-        }
-        // Стратегия 2: первый видимый role="button" внутри области группы
-        const group = document.querySelector('[data-pagelet="Group"]');
-        if (group) {
-            const buttons = group.querySelectorAll('[role="button"]');
-            for (const btn of buttons) {
-                if (btn.offsetParent !== null) return btn;
-            }
-        }
-        // Стратегия 3: любой видимый role="button" на странице
-        const allBtns = document.querySelectorAll('[role="button"]');
-        for (const btn of allBtns) {
-            if (btn.offsetParent !== null && btn.querySelector('span')) return btn;
-        }
-        return null;
-    """)
+        if resp.status_code in (200, 302):
+            log("✅ Пост опубликован (simple POST)!")
+            return True
 
-    if create_post_btn:
-        log("✅ Найдена кнопка создания поста")
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", create_post_btn)
-        random_sleep(0.5, 1)
-
-        try:
-            create_post_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", create_post_btn)
-
-        log("✅ Кнопка нажата, ждём редактора...")
-        random_sleep(3, 5)
-    else:
-        log("⚠️ Кнопка не найдена, переходим на страницу создания поста...")
-        driver.get(f"https://www.facebook.com/groups/{FB_GROUP_ID}/publish")
-        random_sleep(4, 6)
-
-    # 2. Ищем текстовый редактор
-    log("✏️ Ищем текстовый редактор...")
-    text_area = None
-
-    # Сначала ждём модалку
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//div[@role='dialog']"))
-        )
-        log("✅ Модальное окно открыто")
-    except Exception:
-        log("⚠️ Модальное окно не найдено")
-
-    # Ищем textbox внутри модалки или напрямую
-    text_selectors = [
-        "//div[@role='dialog']//div[@role='textbox' and @contenteditable='true']",
-        "//div[@role='dialog']//div[@contenteditable='true']",
-        "//div[@role='textbox' and @contenteditable='true']",
-        "//div[@contenteditable='true']",
-        "//div[@data-lexical-editor='true']",
-        "//div[@class='notranslate']//p[@data-lexical-text='true']",
-    ]
-
-    for sel in text_selectors:
-        try:
-            text_area = WebDriverWait(driver, 3).until(
-                EC.presence_of_element_located((By.XPATH, sel))
-            )
-            if text_area and text_area.is_displayed():
-                log(f"✅ Найден редактор: {sel}")
-                break
-        except Exception:
-            continue
-
-    # JS fallback для поиска редактора
-    if not text_area:
-        log("⚠️ Селекторы не сработали, ищем contenteditable через JS...")
-        text_area = driver.execute_script("""
-            const editables = document.querySelectorAll('[contenteditable="true"]');
-            for (const el of editables) {
-                if (el.offsetParent !== null) {
-                    // Проверяем что это именно текстовая область, не просто кнопка
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width > 100 && rect.height > 30) return el;
-                }
-            }
-            // Очень широкий fallback
-            const allEdit = document.querySelectorAll('[contenteditable]');
-            for (const el of allEdit) {
-                if (el.offsetParent !== null) return el;
-            }
-            return null;
-        """)
-        if text_area:
-            log("✅ Найден contenteditable через JS")
-
-    if not text_area:
-        log("❌ Не найден текстовый редактор")
-        driver.save_screenshot("fb_error_textbox.png")
-        with open("fb_page_source.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
+        log(f"⚠️ Simple POST не сработал: {resp.text[:300]}")
         return False
-
-    # Пробуем кликнуть и ввести текст
-    try:
-        text_area.click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", text_area)
-
-    random_sleep(0.5, 1.5)
-
-    # Очищаем поле если там есть placeholder
-    try:
-        text_area.clear()
-    except Exception:
-        pass
-
-    log("✏️ Вводим текст поста...")
-    for line in post_text.split("\n"):
-        text_area.send_keys(line)
-        text_area.send_keys("\n")
-        random_sleep(0.2, 0.5)
-
-    log("✅ Текст введён")
-    random_sleep(1, 2)
-
-    # 3. Загружаем изображение (опционально)
-    if image_path and os.path.exists(image_path):
-        log(f"🖼️ Загружаем изображение: {image_path}")
-        try:
-            file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
-            file_input.send_keys(os.path.abspath(image_path))
-            log("✅ Изображение отправлено")
-            random_sleep(2, 4)
-        except Exception as e:
-            log(f"⚠️ Не удалось загрузить изображение: {e}")
-    else:
-        log("⚠️ Изображение не найдено, пропускаем")
-
-    random_sleep(1, 2)
-
-    # 4. Прикрепляем файл с ключами
-    if file_path and os.path.exists(file_path):
-        log(f"📎 Прикрепляем файл: {file_path}")
-        try:
-            file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
-            file_input.send_keys(os.path.abspath(file_path))
-            log("✅ Файл прикреплён")
-            random_sleep(2, 3)
-        except Exception as e:
-            log(f"⚠️ Ошибка прикрепления файла: {e}")
-    else:
-        log("⚠️ Файл не найден, пропускаем")
-
-    random_sleep(1, 2)
-
-    # 5. Публикуем
-    log("🚀 Публикуем...")
-    publish_btn = driver.execute_script("""
-        // Ищем кнопку отправки в модалке
-        const dialog = document.querySelector('[role="dialog"]');
-        const candidates = dialog ? dialog.querySelectorAll('[role="button"]') : document.querySelectorAll('[role="button"]');
-        const keywords = ['опубликовать', 'publish', 'post', 'отправить', 'share'];
-        for (const btn of candidates) {
-            const text = (btn.textContent || '').toLowerCase().trim();
-            if (keywords.some(k => text === k || text.includes(k))) {
-                if (btn.offsetParent !== null) return btn;
-            }
-        }
-        // Fallback: последняя видимая кнопка в модалке
-        if (dialog) {
-            const btns = dialog.querySelectorAll('div[role="button"]');
-            for (let i = btns.length - 1; i >= 0; i--) {
-                if (btns[i].offsetParent !== null) return btns[i];
-            }
-        }
-        return null;
-    """)
-
-    if publish_btn:
-        log("✅ Найдена кнопка публикации")
-        try:
-            publish_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", publish_btn)
-        random_sleep(3, 5)
-        log("✅ Пост опубликован!")
-        return True
-    else:
-        log("❌ Не найдена кнопка публикации")
-        driver.save_screenshot("fb_error_publish.png")
+    except Exception as e:
+        log(f"❌ Simple POST исключение: {e}")
         return False
 
 
 def main():
     log("=" * 70)
-    log("📘 FACEBOOK GROUP POSTER v1.0")
+    log("📘 FACEBOOK GROUP POSTER v2 (HTTP-only)")
     log("=" * 70)
 
     if DRY_RUN:
-        log("⚙️ Режим DRY_RUN: публикация не будет выполнена\n")
+        log("⚙️ Режим DRY_RUN\n")
 
     if not COOKIES_B64:
         log("❌ FACEBOOK_COOKIES_B64 не установлена")
@@ -420,7 +249,6 @@ def main():
     # 1. Загружаем ключи
     log("\n📥 Загрузка ключей...")
     all_keys, key_stats, source_info = load_keys()
-
     if not all_keys:
         log("❌ Нет ключей для публикации")
         return 1
@@ -429,7 +257,7 @@ def main():
     log(f"📦 Всего ключей: {total_keys}")
     log(f"📂 Источник: {source_info}")
 
-    # 2. Создаём публичный файл
+    # 2. Создаём публичный файл (на будущее — прикреплять не можем через HTTP)
     log("\n📄 Создание публичного файла...")
     public_file, public_count = create_public_file(all_keys, key_stats)
     log(f"✅ Создан файл: {public_file} ({public_count} ключей)")
@@ -439,44 +267,44 @@ def main():
     log(f"\n📝 Текст поста:\n{post_text}\n")
 
     if DRY_RUN:
-        log("⚙️ DRY_RUN: пропускаем браузер")
+        log("⚙️ DRY_RUN: пропускаем отправку")
         return 0
 
-    # 4. Запускаем браузер и публикуем
-    log("\n🌐 Запуск браузера...")
-    driver = None
-    try:
-        driver = setup_browser()
-        log("✅ Браузер запущен")
-
-        login_with_cookies(driver)
-        random_sleep(1, 2)
-
-        success = post_to_facebook(driver, post_text, COVER_PUBLIC, public_file)
-        if success:
-            log("\n✅ Пост успешно опубликован в Facebook Group!")
-            return 0
-        else:
-            log("\n❌ Не удалось опубликовать пост")
-            return 1
-
-    except Exception as e:
-        log(f"\n❌ Критическая ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+    # 4. Загружаем куки и создаём сессию
+    cookies = load_cookies()
+    if not cookies:
         return 1
-    finally:
-        if driver:
-            random_sleep(2, 3)
-            try:
-                log("📸 Скриншот результата...")
-                driver.save_screenshot("fb_final_screenshot.png")
-            except Exception:
-                pass
-            log("🧹 Закрываем браузер...")
-            driver.quit()
 
-    return 0
+    session = requests.Session()
+
+    # Ставим куки в session
+    for name, value in cookies.items():
+        session.cookies.set(name, value, domain=".facebook.com")
+
+    # Устанавливаем домен по умолчанию
+    log("🌐 Инициализация сессии...")
+    try:
+        resp = session.get("https://www.facebook.com/", timeout=15)
+        log(f"✅ Facebook загружен: HTTP {resp.status_code}")
+    except Exception as e:
+        log(f"❌ Не удалось загрузить facebook.com: {e}")
+        return 1
+
+    # 5. Пробуем опубликовать
+    log("\n🚀 Публикация через GraphQL...")
+    success = post_to_group_via_graphql(session, cookies, post_text, public_file)
+
+    if not success:
+        log("\n🔄 Пробуем Simple POST...")
+        success = try_simple_post(session, post_text)
+
+    if success:
+        log("\n✅ Пост успешно опубликован!")
+        return 0
+    else:
+        log("\n❌ Не удалось опубликовать пост ни одним методом")
+        log("💡 Нужно обновить куки Facebook или получить fb_dtsg вручную")
+        return 1
 
 
 if __name__ == "__main__":

@@ -24,33 +24,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
           pip install -r facebook-group-poster/requirements.txt
-          # Для совместимости: устанавливаем andi-совместимую версию chromedriver
-          pip install undetected-chromedriver==3.5.5
-
-      - name: Setup Chrome (full install)
-        run: |
-          # Chrome уже предустановлен на ubuntu-latest, но ChromeDriver отстаёт.
-          # Устанавливаем через google-chrome и chromedriver из undetected
-          google-chrome --version || true
-          # Удаляем старый chromedriver если есть
-          sudo apt-get remove -y chromedriver 2>/dev/null || true
 
       - name: Copy assets from proxy-auto-checker
         run: |
           cp -r proxy-auto-checker/results facebook-group-poster/ 2>/dev/null || echo "⚠️ results/ не существует"
           cp -r proxy-auto-checker/checked facebook-group-poster/ 2>/dev/null || echo "⚠️ checked/ не существует"
-          cp proxy-auto-checker/cover_public.jpg facebook-group-poster/ 2>/dev/null || echo "⚠️ cover_public.jpg не найден в proxy-auto-checker"
+          cp proxy-auto-checker/cover_public.jpg facebook-group-poster/ 2>/dev/null || echo "⚠️ cover_public.jpg не найден"
           echo "📂 Состав facebook-group-poster:"
           ls -la facebook-group-poster/
 
-      - name: Run Facebook poster
+      - name: Run Facebook poster (HTTP-only, no Selenium)
         env:
           FACEBOOK_COOKIES_B64: ${{ secrets.FACEBOOK_COOKIES_B64 }}
+          FB_USER_ID: ${{ secrets.FB_USER_ID }}
+          FB_DTSG: ${{ secrets.FB_DTSG }}
         run: |
           cd facebook-group-poster
           python post_to_facebook.py
@@ -63,4 +55,5 @@ jobs:
           path: |
             fb_*.png
             fb_*.html
+            *.log
           if-no-files-found: ignore
