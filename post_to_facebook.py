@@ -100,39 +100,61 @@ def extract_fb_dtsg_and_lsd(session: requests.Session) -> tuple:
         fb_dtsg = ""
         lsd = ""
 
-        # ПРОСТОЙ поиск: любой кусок вокруг "dtsg"
-        idx = html.find("dtsg")
-        if idx > 0:
-            start = max(0, idx - 80)
-            end = min(len(html), idx + 250)
-            snippet = html[start:end]
-            # очищаем управляющие
-            import re as _re
-            snippet = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', snippet)
-            log(f"\n🔍 Контекст 'dtsg':\n{snippet[:400]}\n")
+        # Ищем все ServerJS блоки с токенами
+        # Facebook 2026 хранит токены в __bootloader_data__ или ServerJS
 
-        # Пробуем найти любой из этих паттернов
-        patterns = [
-            # fb_dtsg:{"token":"abc",...}
-            (r'(?:fb_dtsg|DTSG)\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "fb_dtsg obj"),
-            # "LSD",[["token","abc"]]
-            (r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', "LSD arr"),
-            # "LSD":{"token":"abc"}
-            (r'"LSD"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "LSD obj"),
-            # "lsd":"abc"
-            (r'"lsd"\s*:\s*"([^"]+)"', "lsd"),
-        ]
+        # Стратегия 1: ищем lsd/req_token в __bootloader_data__
+        m = re.search(r'__bootloader_data__\s*=\s*(\{[^;]+\})', html)
+        if m:
+            boot = m.group(1)
+            m2 = re.search(r'"lsd"\s*:\s*"([^"]+)"', boot)
+            if m2:
+                lsd = m2.group(1)
+                log(f"✅ lsd (bootloader): {lsd[:15]}...")
+            m2 = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', boot)
+            if m2:
+                fb_dtsg = m2.group(1)
+                log(f"✅ fb_dtsg (bootloader): {fb_dtsg[:15]}...")
+            m2 = re.search(r'"token"\s*:\s*"([^"]+)"', boot)
+            if m2 and not lsd:
+                lsd = m2.group(1)
+                log(f"✅ lsd (bootloader token): {lsd[:15]}...")
 
-        for pat, label in patterns:
-            m = re.search(pat, html)
+        # Стратегия 2: ищем "__req" + "lsd" в JSON-data блоках data-ft
+        if not lsd:
+            import html as _html
+            m = re.search(r'data-ft=["\']([^"\']+)["\']', html)
             if m:
-                val = m.group(1)
-                if "fb_dtsg" in label or "DTSG" in label:
-                    fb_dtsg = val
-                    log(f"✅ fb_dtsg ({label}): {val[:15]}...")
-                else:
-                    lsd = val
-                    log(f"✅ lsd ({label}): {val[:15]}...")
+                ft_data = _html.unescape(m.group(1))
+                m2 = re.search(r'"lsd"\s*:\s*"([^"]+)"', ft_data)
+                if m2:
+                    lsd = m2.group(1)
+                    log(f"✅ lsd (data-ft): {lsd[:15]}...")
+
+        # Стратегия 3: ищем в JSON-LD или script[type="application/json"]
+        if not lsd or not fb_dtsg:
+            scripts = re.findall(r'<script[^>]*>(\{[^<]+\})</script>', html)
+            for script in scripts[:5]:  # первые 5 блоков
+                if '"lsd"' in script:
+                    m = re.search(r'"lsd"\s*:\s*"([^"]+)"', script)
+                    if m and not lsd:
+                        lsd = m.group(1)
+                        log(f"✅ lsd (script json): {lsd[:15]}...")
+                if '"fb_dtsg"' in script:
+                    m = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', script)
+                    if m and not fb_dtsg:
+                        fb_dtsg = m.group(1)
+                        log(f"✅ fb_dtsg (script json): {fb_dtsg[:15]}...")
+
+        # Стратегия 4: большой data-json блок
+        if not lsd:
+            m = re.search(r'data-json=["\']([^"\']{100,})["\']', html)
+            if m:
+                raw = _html.unescape(m.group(1))
+                m2 = re.search(r'"lsd"\s*:\s*"([^"]+)"', raw)
+                if m2:
+                    lsd = m2.group(1)
+                    log(f"✅ lsd (data-json): {lsd[:15]}...")
 
         # Fallback fb_dtsg: xs cookie
         if not fb_dtsg:
