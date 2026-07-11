@@ -71,22 +71,22 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
-def load_cookies() -> dict:
-    """Декодирует куки из B64."""
+def load_cookies() -> list:
+    """Декодирует куки из B64. Возвращает список dict'ов (name, value, domain...)."""
     if not COOKIES_B64:
         log("❌ FACEBOOK_COOKIES_B64 не установлена")
-        return {}
+        return []
 
     cookies_json = base64.b64decode(COOKIES_B64).decode("utf-8")
-    cookies_dict = json.loads(cookies_json)
+    cookies_list = json.loads(cookies_json)
 
     # Сохраняем для requests
     os.makedirs(os.path.dirname(COOKIES_FILE), exist_ok=True)
     with open(COOKIES_FILE, "w") as f:
-        json.dump(cookies_dict, f)
+        json.dump(cookies_list, f)
 
-    log(f"✅ Загружено {len(cookies_dict)} кук")
-    return cookies_dict
+    log(f"✅ Загружено {len(cookies_list)} кук")
+    return cookies_list
 
 
 def build_post_text(total_keys, public_count):
@@ -129,7 +129,6 @@ def extract_fb_dtsg(session: requests.Session) -> str:
 
 def post_to_group_via_graphql(
     session: requests.Session,
-    cookies: dict,
     post_text: str,
     file_path: str | None = None,
 ) -> bool:
@@ -300,15 +299,18 @@ def main():
         return 0
 
     # 4. Загружаем куки и создаём сессию
-    cookies = load_cookies()
-    if not cookies:
+    cookies_list = load_cookies()
+    if not cookies_list:
         return 1
 
     session = requests.Session()
 
-    # Ставим куки в session
-    for name, value in cookies.items():
-        session.cookies.set(name, value, domain=".facebook.com")
+    # Ставим куки в session (куки — массив объектов с name/value/domain)
+    for cookie in cookies_list:
+        name = cookie.get("name", "")
+        value = cookie.get("value", "")
+        domain = cookie.get("domain", ".facebook.com")
+        session.cookies.set(name, value, domain=domain)
 
     # Устанавливаем домен по умолчанию
     log("🌐 Инициализация сессии...")
@@ -321,7 +323,7 @@ def main():
 
     # 5. Пробуем опубликовать
     log("\n🚀 Публикация через GraphQL...")
-    success = post_to_group_via_graphql(session, cookies, post_text, public_file)
+    success = post_to_group_via_graphql(session, post_text, public_file)
 
     if not success:
         log("\n🔄 Пробуем Simple POST...")
