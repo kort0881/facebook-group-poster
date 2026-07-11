@@ -192,6 +192,7 @@ def post_to_group_via_graphql(
             timeout=30,
         )
         log(f"📥 Ответ: HTTP {resp.status_code}")
+        log(f"📄 Тело: {resp.text[:2000]}")
 
         if resp.status_code == 200:
             try:
@@ -218,11 +219,10 @@ def post_to_group_via_graphql(
                 if post_id:
                     post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
                     log(f"🔗 Пост: {post_url}")
-                else:
-                    log("ℹ️ post_id не найден в ответе")
-
-                if data.get("data", {}).get("post_create") or data.get("data", {}).get("story_create"):
                     return True
+                else:
+                    log("ℹ️ post_id не найден — возможно, мутация не сработала")
+                    return False
                 if "error" in data:
                     log(f"⚠️ Ошибка GraphQL: {data['error']}")
                     return False
