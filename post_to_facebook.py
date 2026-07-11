@@ -134,201 +134,132 @@ def post_to_group_via_graphql(
 ) -> bool:
     """
     Публикация через внутренний Facebook GraphQL API.
-    Использует тот же эндпоинт, что и SPA-фронтенд Facebook.
+    Использует реальный doc_id: 36949139048065438 (ComposerStoryCreateMutation)
     """
     # 1. Получаем fb_dtsg (anti-CSRF)
     fb_dtsg = extract_fb_dtsg(session)
     if not fb_dtsg:
-        # fallback: из переменной окружения
         fb_dtsg = FB_DTSG
 
     log(f"🔑 fb_dtsg: {'найден' if fb_dtsg else 'не найден'}")
 
-    # Пробуем AJAX-эндпоинт Facebook (тот же, что фронтенд)
-    # Это самый надёжный способ — его не блокируют, doc_id не нужен
-    log("📤 Отправка AJAX-запроса к /ajax/group/post/stories/...")
-    try:
-        ajax_data = {
-            "fb_dtsg": fb_dtsg,
-            "target": FB_GROUP_ID,
-            "xhpc_targetid": FB_GROUP_ID,
-            "xhpc_message": post_text,
-            "xhpc_ismeta": "1",
-            "xhpc_context": "group",
-            "source": "WWW",
+    # Пробуем нетто-токен (если есть в куках)
+    for cookie in session.cookies:
+        if cookie.name == "c_user":
+            FB_USER_ID_ENV = cookie.value
+            break
+    else:
+        FB_USER_ID_ENV = FB_USER_ID or "61591249905664"
+
+    DOC_ID = "36949139048065438"
+    FB_FRIENDLY_NAME = "ComposerStoryCreateMutation"
+
+    # Формируем variables в точности как Facebook фронтенд
+    variables = {
+        "input": {
             "composer_entry_point": "group",
+            "composer_source_surface": "group",
             "composer_type": "group",
-            "composer_session_id": f"composer_{int(time.time())}",
+            "source": "WWW",
+            "message": {
+                "text": post_text,
+            },
+            "audience": {
+                "to_id": FB_GROUP_ID,
+            },
+            "actor_id": FB_USER_ID_ENV,
             "client_mutation_id": str(int(time.time() * 1000)),
-            "c_src": "composer",
-            "referrer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
-            "__user": FB_USER_ID or "0",
-            "__a": "1",
-            "__req": "1",
-            "__dyn": "7xe8w5m1n8u13z9un4o1co6om3w5qw8xe3z1xmbwn8ouw8xo60a3x4m3q1ewc60Vo3-1e1jxse2i3odAo2&",
-            "__csr": "",
-            "__comet_req": "1",
-            "jazoest": "2" + "0" * random.randint(200, 400),
+            "composer_session_id": f"composer_{int(time.time())}",
+            "navigation_store_id": f"nav_{int(time.time())}",
         }
+    }
 
-        ajax_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://www.facebook.com",
-            "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-            "X-FB-Friendly-Name": "ComposerPlutoAttachmentSurfaceCreateMutation",
-            "X-FB-LSD": fb_dtsg,
-        }
+    payload = {
+        "av": FB_USER_ID_ENV,
+        "__user": FB_USER_ID_ENV,
+        "__a": "1",
+        "__req": str(random.randint(1, 20)),
+        "__hs": "19861.HYP:comet_pkg.2.1.1.1.0",
+        "__comet_req": "1",
+        "fb_api_caller_class": "RelayModern",
+        "fb_api_req_friendly_name": FB_FRIENDLY_NAME,
+        "variables": json.dumps(variables),
+        "doc_id": DOC_ID,
+        "fb_dtsg": fb_dtsg,
+        "jazoest": "2" + str(random.randint(1000, 9999)),
+        "dpr": "2",
+    }
 
-        resp = session.post(
-            "https://www.facebook.com/ajax/group/post/stories/",
-            data=ajax_data,
-            headers=ajax_headers,
-            timeout=30,
-        )
-        log(f"📥 AJAX ответ: HTTP {resp.status_code}")
-        log(f"📄 Тело: {resp.text[:2000]}")
-
-        if resp.status_code in (200, 302):
-            # Ищем post_id или redirect URL
-            post_match = re.search(r'post_id["\']?\s*[:=]\s*["\']?(\d+)', resp.text)
-            if post_match:
-                post_id = post_match.group(1)
-                post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
-                log(f"🔗 Пост: {post_url}")
-                return True
-
-            # Если нет post_id, но статус 200 — проверяем на успех
-            if 'success' in resp.text.lower() or resp.status_code == 302:
-                log("✅ AJAX запрос успешен (нет post_id в ответе)")
-                return True
-
-        # Если AJAX не сработал — пробуем GraphQL как fallback
-        log("🔄 AJAX не сработал, пробуем GraphQL...")
-    except Exception as e:
-        log(f"❌ AJAX исключение: {e}")
-
-    # --- GraphQL fallback ---
-    log("📤 Отправка GraphQL-запроса...")
-    try:
-        # Пробуем другой doc_id — более новый
-        graphql_doc_ids = [
-            "5095407912680046",  # старый
-            "6309070990685293",  # альтернативный
-        ]
-
-        for doc_id in graphql_doc_ids:
-            if doc_id == "5095407912680046":
-                log(f"  doc_id={doc_id}...")
-                continue  # уже пробовали, не работает
-
-            variables = {
-                "input": {
-                    "group_id": FB_GROUP_ID,
-                    "message": post_text,
-                    "source": "WWW",
-                    "composer_entry_point": "group",
-                    "composer_session_id": f"composer_{int(time.time())}",
-                    "composer_type": "group",
-                    "client_mutation_id": str(int(time.time() * 1000)),
-                    "audience": {"to_id": FB_GROUP_ID},
-                    "navigation_store_id": f"nav_{int(time.time())}",
-                },
-                "displayCommentsCreateFormContext": {},
-            }
-
-            payload = {
-                "fb_api_req_friendly_name": "ComposerPlutoAttachmentSurfaceCreateMutation",
-                "variables": json.dumps(variables),
-                "doc_id": doc_id,
-                "fb_dtsg": fb_dtsg,
-                "av": FB_USER_ID or "0",
-            }
-
-            resp = session.post(
-                "https://www.facebook.com/api/graphql/",
-                data=payload,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
-                },
-                timeout=30,
-            )
-
-            log(f"📥 GraphQL ответ (doc_id={doc_id}): HTTP {resp.status_code}")
-            log(f"📄 Тело: {resp.text[:2000]}")
-
-            if resp.status_code == 200 and resp.text.strip():
-                try:
-                    data = resp.json()
-                    post_id = None
-                    try:
-                        post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
-                    except Exception:
-                        pass
-                    if not post_id:
-                        try:
-                            post_id = data.get("data", {}).get("post_create", {}).get("post", {}).get("id")
-                        except Exception:
-                            pass
-                    if post_id:
-                        post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
-                        log(f"🔗 Пост: {post_url}")
-                        return True
-                except json.JSONDecodeError:
-                    pass
-
-        return False
-    except Exception as e:
-        log(f"❌ GraphQL исключение: {e}")
-        return False
-
-
-def try_simple_post(session: requests.Session, post_text: str) -> bool:
-    """
-    Самый простой способ — POST на /a/group/post.php (старый endpoint).
-    Facebook всё ещё поддерживает его для совместимости.
-    """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://www.facebook.com",
         "Referer": f"https://www.facebook.com/groups/{FB_GROUP_ID}/",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "X-FB-Friendly-Name": FB_FRIENDLY_NAME,
+        "X-FB-LSD": fb_dtsg,
     }
 
-    data = {
-        "fb_dtsg": extract_fb_dtsg(session),
-        "target": FB_GROUP_ID,
-        "xhpc_targetid": FB_GROUP_ID,
-        "xhpc_message": post_text,
-        "xhpc_ismeta": "1",
-        "xhpc_context": "group",
-        "source": "WWW",
-    }
-
+    log(f"📤 GraphQL (doc_id={DOC_ID})...")
     try:
         resp = session.post(
-            "https://www.facebook.com/ajax/group/post/stories/",
-            data=data,
+            "https://www.facebook.com/api/graphql/",
+            data=payload,
             headers=headers,
             timeout=30,
         )
-        log(f"📥 Simple POST ответ: HTTP {resp.status_code}")
+        log(f"📥 HTTP {resp.status_code}")
+        log(f"📄 Тело: {resp.text[:2000]}")
 
-        if resp.status_code in (200, 302):
-            log("✅ Пост опубликован (simple POST)!")
-            return True
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
 
-        log(f"⚠️ Simple POST не сработал: {resp.text[:300]}")
-        return False
+                # Парсим post_id
+                post_id = None
+                try:
+                    post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("post_id")
+                except Exception:
+                    pass
+                if not post_id:
+                    try:
+                        post_id = data.get("data", {}).get("story_create", {}).get("story", {}).get("id")
+                    except Exception:
+                        pass
+                if not post_id:
+                    post_id = re.search(r'"post_id"\s*:\s*"(\d+)"', resp.text)
+
+                if post_id:
+                    post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{post_id}"
+                    log(f"🔗 Пост: {post_url}")
+                    return True
+
+                # Если в ответе есть story_create — успех
+                if "story_create" in resp.text:
+                    # Ищем любой ID в ответе
+                    id_match = re.search(r'"id"\s*:\s*"(\d+)"', resp.text)
+                    if id_match:
+                        post_url = f"https://www.facebook.com/groups/{FB_GROUP_ID}/posts/{id_match.group(1)}"
+                        log(f"🔗 Пост: {post_url}")
+                        return True
+                    log("✅ Пост создан (story_create в ответе)")
+                    return True
+
+                log("⚠️ Ответ не содержит story_create")
+                return False
+
+            except json.JSONDecodeError:
+                log("⚠️ Ответ не JSON")
+                return False
+        else:
+            log(f"❌ HTTP {resp.status_code}")
+            return False
     except Exception as e:
-        log(f"❌ Simple POST исключение: {e}")
+        log(f"❌ Исключение: {e}")
         return False
 
 
