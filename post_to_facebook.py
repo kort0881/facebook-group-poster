@@ -100,26 +100,34 @@ def extract_fb_dtsg_and_lsd(session: requests.Session) -> tuple:
         fb_dtsg = ""
         lsd = ""
 
-        # Ищем input[name="fb_dtsg"]
-        m = re.search(r'input[^>]*name\s*=\s*["\']fb_dtsg["\'][^>]*value\s*=\s*["\']([^"\']+)["\']', html)
+        # Ищем fb_dtsg: {"token":"abc","token_type":1}
+        m = re.search(r'(?:fb_dtsg|DTSG)\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', html)
         if m:
             fb_dtsg = m.group(1)
-            log(f"✅ fb_dtsg: {fb_dtsg[:15]}...")
+            log(f"✅ fb_dtsg (token object): {fb_dtsg[:15]}...")
 
-        # Ищем input[name="lsd"]
-        m = re.search(r'input[^>]*name\s*=\s*["\']lsd["\'][^>]*value\s*=\s*["\']([^"\']+)["\']', html)
-        if m:
-            lsd = m.group(1)
-            log(f"✅ lsd: {lsd[:15]}...")
-
-        # Fallback: JSON-блок fb_dtsg
-        if not fb_dtsg:
-            m = re.search(r'"fb_dtsg"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', html)
+        # Ищем lsd: "LSD",["token","abc"]
+        if not lsd:
+            m = re.search(r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', html)
             if m:
-                fb_dtsg = m.group(1)
-                log(f"✅ fb_dtsg (JSON): {fb_dtsg[:15]}...")
+                lsd = m.group(1)
+                log(f"✅ lsd (LSD token): {lsd[:15]}...")
 
-        # Fallback: xs cookie
+        # Ищем lsd: {"LSD":{"token":"abc"}}
+        if not lsd:
+            m = re.search(r'"LSD"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', html)
+            if m:
+                lsd = m.group(1)
+                log(f"✅ lsd (LSD obj): {lsd[:15]}...")
+
+        # Ищем lsd в __bootloader_data__
+        if not lsd:
+            m = re.search(r'"lsd"\s*:\s*"([^"]+)"', html)
+            if m:
+                lsd = m.group(1)
+                log(f"✅ lsd (lsd field): {lsd[:15]}...")
+
+        # Fallback fb_dtsg: xs cookie
         if not fb_dtsg:
             for cookie in session.cookies:
                 if cookie.name == "xs":
