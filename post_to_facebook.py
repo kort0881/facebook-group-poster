@@ -101,8 +101,10 @@ def setup_browser():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
     options.add_argument("--silent")
+    options.add_argument("--disable-logging")
     options.add_argument("--disable-notifications")
-    options.add_argument(f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument(f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
 
     prefs = {
         "profile.default_content_setting_values.notifications": 2,
@@ -115,7 +117,7 @@ def setup_browser():
     import logging
     logging.getLogger("undetected_chromedriver").setLevel(logging.WARNING)
 
-    driver = uc.Chrome(options=options, version_main=0)
+    driver = uc.Chrome(options=options)
     driver.set_page_load_timeout(30)
 
     # Подменяем webdriver detection
@@ -182,149 +184,169 @@ def post_to_facebook(driver, post_text, image_path, file_path):
     """
     Основная функция: публикует пост в группу Facebook.
     """
-    log(f"🌐 Открываем группу: {FB_GROUP_URL}")
-    driver.get(FB_GROUP_URL)
-    random_sleep(3, 5)
-
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
     wait = WebDriverWait(driver, 20)
 
-    # 1. Находим поле "Что у вас нового?"
+    # Если есть изображение — загружаем через прямой URL с ?sk=photos
+    # Иначе используем стандартную страницу группы
+    log(f"🌐 Открываем группу: {FB_GROUP_URL}")
+    driver.get(FB_GROUP_URL)
+    random_sleep(4, 6)
+
+    # 1. Пытаемся найти и нажать кнопку "Создать публикацию"
     log("🔍 Ищем поле ввода...")
     try:
-        # Пробуем разные селекторы
-        selectors = [
-            "//span[contains(text(), 'Чем вы хотите поделиться')]/..",
-            "//span[contains(text(), 'What')]/..",
-            "//div[@role='button']//span[contains(text(), 'у вас нового')]/..",
-            "//div[@role='button']//span[contains(text(), 'нового')]/..",
-            "//div[@aria-label='Создать публикацию']",
-            "//div[@aria-label='Create a post']",
-            "//div[@role='button']//span[contains(text(), 'Write something')]/..",
-            "//form[@method='POST']//div[@role='button']",
-            "//div[@data-pagelet='Group']//div[@role='button']",
-        ]
-        create_post_btn = None
-        for sel in selectors:
-            try:
-                create_post_btn = wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
-                log(f"✅ Найден селектор: {sel}")
-                break
-            except Exception:
-                continue
+        # Ждём загрузки страницы группы
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@data-pagelet='Group']"))
+        )
+        log("✅ Страница группы загружена")
+    except Exception:
+        log("⚠️ data-pagelet=Group не найден")
 
-        if not create_post_btn:
-            # Пробуем просто кликнуть в центр страницы
-            log("⚠️ Селекторы не сработали, кликаем в центр...")
-            create_post_btn = driver.find_element(By.TAG_NAME, "body")
+    # Универсальный поиск кнопки создания поста через JS
+    create_post_btn = driver.execute_script("""
+        // Стратегия 1: ищем текстовую кнопку с ключевыми словами
+        const keywords = ['нового', 'write', 'what', 'create', 'поделиться', 'публикаци'];
+        const links = document.querySelectorAll('a[role="button"], div[role="button"], span[role="button"]');
+        for (const el of links) {
+            const text = (el.textContent || '').toLowerCase();
+            if (keywords.some(k => text.includes(k)) && el.offsetParent !== null) {
+                return el;
+            }
+        }
+        // Стратегия 2: первый видимый role="button" внутри области группы
+        const group = document.querySelector('[data-pagelet="Group"]');
+        if (group) {
+            const buttons = group.querySelectorAll('[role="button"]');
+            for (const btn of buttons) {
+                if (btn.offsetParent !== null) return btn;
+            }
+        }
+        // Стратегия 3: любой видимый role="button" на странице
+        const allBtns = document.querySelectorAll('[role="button"]');
+        for (const btn of allBtns) {
+            if (btn.offsetParent !== null && btn.querySelector('span')) return btn;
+        }
+        return null;
+    """)
 
-        create_post_btn.click()
-        random_sleep(2, 4)
-    except Exception as e:
-        log(f"❌ Не удалось открыть редактор поста: {e}")
-        # Сохраняем скриншот для отладки
-        driver.save_screenshot("fb_error_create_post.png")
-        log("📸 Скриншот сохранён: fb_error_create_post.png")
-        return False
+    if create_post_btn:
+        log("✅ Найдена кнопка создания поста")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", create_post_btn)
+        random_sleep(0.5, 1)
 
-    # 2. Вводим текст
-    log("✏️ Вводим текст поста...")
+        try:
+            create_post_btn.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", create_post_btn)
+
+        log("✅ Кнопка нажата, ждём редактора...")
+        random_sleep(3, 5)
+    else:
+        log("⚠️ Кнопка не найдена, переходим на страницу создания поста...")
+        driver.get(f"https://www.facebook.com/groups/{FB_GROUP_ID}/publish")
+        random_sleep(4, 6)
+
+    # 2. Ищем текстовый редактор
+    log("✏️ Ищем текстовый редактор...")
+    text_area = None
+
+    # Сначала ждём модалку
     try:
-        text_selectors = [
-            "//div[@role='textbox' and @aria-label]",
-            "//div[@contenteditable='true']",
-            "//div[@data-lexical-editor='true']",
-            "//div[@class='notranslate']//p",
-            "//div[@aria-label[contains(.,'публикац') or contains(.,'post') or contains(.,'Write') or contains(.,'нового')]]",
-            "//div[@contenteditable='true' and @role='textbox']",
-            "//div[@contenteditable='true' and @spellcheck='true']",
-            "//*[@contenteditable='true']",
-        ]
-        text_area = None
-        for sel in text_selectors:
-            try:
-                text_area = wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
-                if text_area:
-                    log(f"✅ Найден редактор: {sel}")
-                    break
-            except Exception:
-                continue
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@role='dialog']"))
+        )
+        log("✅ Модальное окно открыто")
+    except Exception:
+        log("⚠️ Модальное окно не найдено")
 
-        if not text_area:
-            # Пробуем найти любой видимый contenteditable
-            log("⚠️ Селекторы не сработали, ищем contenteditable элементы...")
-            all_editable = driver.find_elements(By.CSS_SELECTOR, "[contenteditable='true']")
-            for el in all_editable:
-                if el.is_displayed():
-                    text_area = el
-                    log("✅ Найден contenteditable элемент")
-                    break
+    # Ищем textbox внутри модалки или напрямую
+    text_selectors = [
+        "//div[@role='dialog']//div[@role='textbox' and @contenteditable='true']",
+        "//div[@role='dialog']//div[@contenteditable='true']",
+        "//div[@role='textbox' and @contenteditable='true']",
+        "//div[@contenteditable='true']",
+        "//div[@data-lexical-editor='true']",
+        "//div[@class='notranslate']//p[@data-lexical-text='true']",
+    ]
 
-        if not text_area:
-            log("❌ Не найден текстовый редактор")
-            # Сохраняем скриншот и HTML для отладки
-            driver.save_screenshot("fb_error_textbox.png")
-            with open("fb_page_source.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            log("📸 Скриншот: fb_error_textbox.png")
-            log("📄 HTML страницы сохранён в fb_page_source.html")
-            return False
+    for sel in text_selectors:
+        try:
+            text_area = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.XPATH, sel))
+            )
+            if text_area and text_area.is_displayed():
+                log(f"✅ Найден редактор: {sel}")
+                break
+        except Exception:
+            continue
 
-        text_area.click()
-        random_sleep(0.5, 1.5)
+    # JS fallback для поиска редактора
+    if not text_area:
+        log("⚠️ Селекторы не сработали, ищем contenteditable через JS...")
+        text_area = driver.execute_script("""
+            const editables = document.querySelectorAll('[contenteditable="true"]');
+            for (const el of editables) {
+                if (el.offsetParent !== null) {
+                    // Проверяем что это именно текстовая область, не просто кнопка
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 100 && rect.height > 30) return el;
+                }
+            }
+            // Очень широкий fallback
+            const allEdit = document.querySelectorAll('[contenteditable]');
+            for (const el of allEdit) {
+                if (el.offsetParent !== null) return el;
+            }
+            return null;
+        """)
+        if text_area:
+            log("✅ Найден contenteditable через JS")
 
-        # Печатаем с человеческой скоростью
-        for line in post_text.split("\n"):
-            text_area.send_keys(line)
-            text_area.send_keys("\n")
-            random_sleep(0.3, 0.8)
-
-        log("✅ Текст введён")
-    except Exception as e:
-        log(f"❌ Ошибка ввода текста: {e}")
+    if not text_area:
+        log("❌ Не найден текстовый редактор")
+        driver.save_screenshot("fb_error_textbox.png")
+        with open("fb_page_source.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
         return False
 
+    # Пробуем кликнуть и ввести текст
+    try:
+        text_area.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", text_area)
+
+    random_sleep(0.5, 1.5)
+
+    # Очищаем поле если там есть placeholder
+    try:
+        text_area.clear()
+    except Exception:
+        pass
+
+    log("✏️ Вводим текст поста...")
+    for line in post_text.split("\n"):
+        text_area.send_keys(line)
+        text_area.send_keys("\n")
+        random_sleep(0.2, 0.5)
+
+    log("✅ Текст введён")
     random_sleep(1, 2)
 
-    # 3. Загружаем изображение
+    # 3. Загружаем изображение (опционально)
     if image_path and os.path.exists(image_path):
         log(f"🖼️ Загружаем изображение: {image_path}")
         try:
-            # Кликаем "Фото/видео"
-            photo_btn_selectors = [
-                "//div[@aria-label='Фото/видео']",
-                "//div[@aria-label='Photo/video']",
-                "//span[text()='Фото/видео']/..",
-                "//span[text()='Photo/video']/..",
-                "//div[@role='button']//i[contains(@data-visualcompletion, 'css')]/../../..",
-            ]
-            photo_btn = None
-            for sel in photo_btn_selectors:
-                try:
-                    photo_btn = driver.find_element(By.XPATH, sel)
-                    break
-                except Exception:
-                    continue
-
-            if photo_btn:
-                # Ищем input[type=file] внутри
-                file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
-                file_input.send_keys(os.path.abspath(image_path))
-                log("✅ Изображение загружено через input[type=file]")
-                random_sleep(2, 4)
-            else:
-                log("⚠️ Кнопка фото не найдена, пробуем input[type=file] напрямую")
-                try:
-                    file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
-                    file_input.send_keys(os.path.abspath(image_path))
-                    random_sleep(2, 4)
-                except Exception as e2:
-                    log(f"⚠️ Не удалось загрузить фото: {e2}")
+            file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
+            file_input.send_keys(os.path.abspath(image_path))
+            log("✅ Изображение отправлено")
+            random_sleep(2, 4)
         except Exception as e:
-            log(f"⚠️ Ошибка загрузки изображения: {e}")
+            log(f"⚠️ Не удалось загрузить изображение: {e}")
     else:
         log("⚠️ Изображение не найдено, пропускаем")
 
@@ -334,55 +356,51 @@ def post_to_facebook(driver, post_text, image_path, file_path):
     if file_path and os.path.exists(file_path):
         log(f"📎 Прикрепляем файл: {file_path}")
         try:
-            # Ищем все input[type=file] — второй может быть для файла
-            file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            if len(file_inputs) >= 2:
-                file_inputs[1].send_keys(os.path.abspath(file_path))
-                log("✅ Файл прикреплён")
-            elif file_inputs:
-                file_inputs[0].send_keys(os.path.abspath(file_path))
-                log("✅ Файл отправлен через первый input")
-            else:
-                log("⚠️ Не найдены input[type=file]")
+            file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
+            file_input.send_keys(os.path.abspath(file_path))
+            log("✅ Файл прикреплён")
+            random_sleep(2, 3)
         except Exception as e:
             log(f"⚠️ Ошибка прикрепления файла: {e}")
+    else:
+        log("⚠️ Файл не найден, пропускаем")
 
     random_sleep(1, 2)
 
     # 5. Публикуем
     log("🚀 Публикуем...")
-    try:
-        publish_selectors = [
-            "//span[text()='Опубликовать']/..",
-            "//span[text()='Publish']/..",
-            "//span[text()='Post']/..",
-            "//div[@aria-label='Опубликовать']",
-            "//div[@aria-label='Post']",
-            "//div[@role='button']//span[contains(text(), 'Опубликовать')]/..",
-            "//div[@role='button']//span[contains(text(), 'Publish')]/..",
-        ]
-        publish_btn = None
-        for sel in publish_selectors:
-            try:
-                publish_btn = wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
-                if publish_btn:
-                    log(f"✅ Найдена кнопка публикации: {sel}")
-                    break
-            except Exception:
-                continue
+    publish_btn = driver.execute_script("""
+        // Ищем кнопку отправки в модалке
+        const dialog = document.querySelector('[role="dialog"]');
+        const candidates = dialog ? dialog.querySelectorAll('[role="button"]') : document.querySelectorAll('[role="button"]');
+        const keywords = ['опубликовать', 'publish', 'post', 'отправить', 'share'];
+        for (const btn of candidates) {
+            const text = (btn.textContent || '').toLowerCase().trim();
+            if (keywords.some(k => text === k || text.includes(k))) {
+                if (btn.offsetParent !== null) return btn;
+            }
+        }
+        // Fallback: последняя видимая кнопка в модалке
+        if (dialog) {
+            const btns = dialog.querySelectorAll('div[role="button"]');
+            for (let i = btns.length - 1; i >= 0; i--) {
+                if (btns[i].offsetParent !== null) return btns[i];
+            }
+        }
+        return null;
+    """)
 
-        if not publish_btn:
-            log("❌ Не найдена кнопка публикации")
-            driver.save_screenshot("fb_error_publish.png")
-            return False
-
-        publish_btn.click()
+    if publish_btn:
+        log("✅ Найдена кнопка публикации")
+        try:
+            publish_btn.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", publish_btn)
         random_sleep(3, 5)
-
         log("✅ Пост опубликован!")
         return True
-    except Exception as e:
-        log(f"❌ Ошибка публикации: {e}")
+    else:
+        log("❌ Не найдена кнопка публикации")
         driver.save_screenshot("fb_error_publish.png")
         return False
 
