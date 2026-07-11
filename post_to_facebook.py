@@ -102,25 +102,30 @@ def build_post_text(total_keys, public_count):
 
 
 def extract_fb_dtsg(session: requests.Session) -> str:
-    """Извлекает fb_dtsg / token из страницы Facebook."""
+    """Извлекает fb_dtsg / token из HTML страницы Facebook."""
     try:
         resp = session.get(
-            "https://www.facebook.com/api/graphql/",
-            params={"fb_api_req_friendly_name": "GroupsCometFeedRegularStoriesQuery"},
+            "https://www.facebook.com/",
             timeout=15,
         )
-        # Пробуем найти токен в ответе
         text = resp.text
-        # Ищем fb_dtsg в HTML
-        token_match = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', text)
-        if token_match:
-            return token_match.group(1)
 
-        # Пробуем из кук
+        # fb_dtsg выглядит так: "fb_dtsg":{"token":"abc123","token_type":1}
+        # или fb_dtsg":"abc123"
+        pattern1 = re.search(r'"fb_dtsg"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', text)
+        if pattern1:
+            return pattern1.group(1)
+
+        pattern2 = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', text)
+        if pattern2:
+            return pattern2.group(1)
+
+        # Ищем в куках xs (это тоже token)
         for cookie in session.cookies:
             if cookie.name == "xs":
                 return cookie.value
 
+        log("⚠️ fb_dtsg не найден")
         return ""
     except Exception as e:
         log(f"⚠️ Не удалось извлечь fb_dtsg: {e}")
@@ -216,8 +221,24 @@ def post_to_group_via_graphql(
         log(f"📄 Тело: {resp.text[:2000]}")
 
         if resp.status_code == 200:
+            # Убираем защитный префикс for (;;);
+            body = resp.text
+            if body.startswith("for (;;);"):
+                body = body[9:]
+
             try:
-                data = resp.json()
+                data = json.loads(body)
+
+                # Проверяем на ошибки
+                if "error" in data:
+                    error_code = data.get("error")
+                    error_summary = data.get("errorSummary", "")
+                    error_desc = data.get("errorDescription", "")
+                    log(f"⚠️ Facebook error {error_code}: {error_summary} — {error_desc}")
+
+                    if error_code == 1357032:
+                        log("💡 fb_dtsg невалидный — куки протухли или нужно обновить")
+                    return False
 
                 # Парсим post_id
                 post_id = None
