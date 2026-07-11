@@ -111,40 +111,49 @@ def extract_fb_dtsg(session: requests.Session) -> str:
         text = resp.text
         log(f"📄 Размер HTML: {len(text)} символов")
 
-        # fb_dtsg в современном Facebook — это {"token":"abc","token_type":1}
+        # ПРИОРИТЕТ: ищем fb_dtsg в HTML (там свежий токен на эту сессию)
+        # В современном Facebook: {"token":"abc123","token_type":1}
         pattern1 = re.search(r'"fb_dtsg"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', text)
         if pattern1:
             token = pattern1.group(1)
-            log(f"✅ fb_dtsg найден: {token[:10]}...")
+            log(f"✅ fb_dtsg из HTML (token): {token[:15]}...")
             return token
 
         # fb_dtsg": "abc123"
         pattern2 = re.search(r'"fb_dtsg"\s*:\s*"([^"]+)"', text)
         if pattern2:
             token = pattern2.group(1)
-            log(f"✅ fb_dtsg найден (plain): {token[:10]}...")
+            log(f"✅ fb_dtsg из HTML (plain): {token[:15]}...")
             return token
 
-        # Ищем в куках xs (это тоже token, но нужно декодировать)
-        for cookie in session.cookies:
-            if cookie.name == "xs":
-                token = unquote(cookie.value)
-                log(f"✅ fb_dtsg из xs cookie (raw): {cookie.value[:15]}...")
-                log(f"✅ fb_dtsg из xs cookie (decoded): {token[:15]}...")
-                return token
-
-        # Последний шанс — ищем LSD token (он часто совпадает с fb_dtsg)
+        # LSD token — второй по приоритету
         pattern_lsd = re.search(r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', text)
         if pattern_lsd:
             token = pattern_lsd.group(1)
-            log(f"✅ LSD token как fb_dtsg: {token[:10]}...")
+            log(f"✅ LSD token: {token[:15]}...")
             return token
 
+        # ServerJS init с fb_dtsg
+        pattern_sjs = re.search(r'ServerJS\s*\.\s*connectStatic\s*\(\s*\{[^}]*"fb_dtsg"\s*:\s*"([^"]+)"', text)
+        if pattern_sjs:
+            token = pattern_sjs.group(1)
+            log(f"✅ fb_dtsg из ServerJS: {token[:15]}...")
+            return token
+
+        # Ищем в куках xs (низкий приоритет — может устареть)
+        for cookie in session.cookies:
+            if cookie.name == "xs":
+                token = unquote(cookie.value)
+                log(f"ℹ️ xs cookie (fallback): {token[:15]}...")
+                return token
+
         log("❌ fb_dtsg не найден ни одним способом")
-        # Выведем 500 символов вокруг "dtsg" для отладки
-        idx = text.find("dtsg")
-        if idx > 0:
-            log(f"🔍 Контекст dtsg: {text[max(0,idx-100):idx+200]}")
+        # Выведем контекст вокруг "dtsg" для отладки
+        for keyword in ["dtsg", "DTSG", "LSD", "token", "__dtsg"]:
+            idx = text.find(keyword)
+            if idx > 0:
+                log(f"🔍 '{keyword}' контекст: ...{text[max(0,idx-50):idx+200]}...")
+                break
         return ""
     except Exception as e:
         log(f"⚠️ Не удалось извлечь fb_dtsg: {e}")
