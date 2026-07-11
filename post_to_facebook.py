@@ -100,32 +100,39 @@ def extract_fb_dtsg_and_lsd(session: requests.Session) -> tuple:
         fb_dtsg = ""
         lsd = ""
 
-        # Ищем fb_dtsg: {"token":"abc","token_type":1}
-        m = re.search(r'(?:fb_dtsg|DTSG)\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', html)
-        if m:
-            fb_dtsg = m.group(1)
-            log(f"✅ fb_dtsg (token object): {fb_dtsg[:15]}...")
+        # ПРОСТОЙ поиск: любой кусок вокруг "dtsg"
+        idx = html.find("dtsg")
+        if idx > 0:
+            start = max(0, idx - 80)
+            end = min(len(html), idx + 250)
+            snippet = html[start:end]
+            # очищаем управляющие
+            import re as _re
+            snippet = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', snippet)
+            log(f"\n🔍 Контекст 'dtsg':\n{snippet[:400]}\n")
 
-        # Ищем lsd: "LSD",["token","abc"]
-        if not lsd:
-            m = re.search(r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', html)
-            if m:
-                lsd = m.group(1)
-                log(f"✅ lsd (LSD token): {lsd[:15]}...")
+        # Пробуем найти любой из этих паттернов
+        patterns = [
+            # fb_dtsg:{"token":"abc",...}
+            (r'(?:fb_dtsg|DTSG)\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "fb_dtsg obj"),
+            # "LSD",[["token","abc"]]
+            (r'"LSD"\s*,\s*\[\s*\[\s*"token"\s*,\s*"([^"]+)"', "LSD arr"),
+            # "LSD":{"token":"abc"}
+            (r'"LSD"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "LSD obj"),
+            # "lsd":"abc"
+            (r'"lsd"\s*:\s*"([^"]+)"', "lsd"),
+        ]
 
-        # Ищем lsd: {"LSD":{"token":"abc"}}
-        if not lsd:
-            m = re.search(r'"LSD"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', html)
+        for pat, label in patterns:
+            m = re.search(pat, html)
             if m:
-                lsd = m.group(1)
-                log(f"✅ lsd (LSD obj): {lsd[:15]}...")
-
-        # Ищем lsd в __bootloader_data__
-        if not lsd:
-            m = re.search(r'"lsd"\s*:\s*"([^"]+)"', html)
-            if m:
-                lsd = m.group(1)
-                log(f"✅ lsd (lsd field): {lsd[:15]}...")
+                val = m.group(1)
+                if "fb_dtsg" in label or "DTSG" in label:
+                    fb_dtsg = val
+                    log(f"✅ fb_dtsg ({label}): {val[:15]}...")
+                else:
+                    lsd = val
+                    log(f"✅ lsd ({label}): {val[:15]}...")
 
         # Fallback fb_dtsg: xs cookie
         if not fb_dtsg:
