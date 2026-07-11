@@ -22,6 +22,35 @@ from key_loader import (
     create_public_file,
 )
 
+
+def load_keys():
+    """Загрузка ключей — идентично v1."""
+    all_keys = []
+    key_stats = None
+    source_info = ""
+
+    if os.path.exists(PREMIUM_FOLDER):
+        log("📁 Ищем ключи в results/premium/...")
+        all_keys, key_stats = load_premium_keys()
+        if all_keys:
+            source_info = "results/premium (elite + premium + good)"
+            log(f"✅ Загружено из results/premium: {len(all_keys)} ключей")
+
+    if not all_keys:
+        log("📁 Premium пусто, ищем verified/semi_dead...")
+        all_keys, filename, source = load_fallback_keys()
+        if all_keys:
+            source_info = f"{source} ({filename})"
+            log(f"✅ Fallback: {len(all_keys)} ключей из {filename}")
+        else:
+            log("⚠️ verified/semi_dead нет, пробуем checked/latest/verified.txt...")
+            all_keys = load_light_verified_keys()
+            if all_keys:
+                source_info = "checked/latest/verified.txt (TCP-only)"
+                log(f"✅ Fallback: {len(all_keys)} ключей из checked/latest/verified.txt")
+
+    return all_keys, key_stats, source_info
+
 # --- КОНФИГУРАЦИЯ ---
 DRY_RUN = os.environ.get("FB_DRY_RUN", "0") == "1"
 COOKIES_B64 = os.environ.get("FACEBOOK_COOKIES_B64", "")
