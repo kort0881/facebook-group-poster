@@ -2,14 +2,14 @@ name: Facebook Poster
 
 on:
   schedule:
-    - cron: '0 8 * * *'      # раз в день в 8:00 UTC (11:00 МСК)
-  workflow_dispatch:          # ручной запуск
+    - cron: '0 8 * * *'
+  workflow_dispatch:
 
 jobs:
   post:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout proxy-auto-checker (keys + cover)
+      - name: Checkout proxy-auto-checker
         uses: actions/checkout@v4
         with:
           repository: kort0881/proxy-auto-checker
@@ -29,20 +29,18 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r facebook-group-poster/requirements.txt
+          # Playwright browsers
+          python -m playwright install chromium
 
       - name: Copy assets from proxy-auto-checker
         run: |
           cp -r proxy-auto-checker/results facebook-group-poster/ 2>/dev/null || echo "⚠️ results/ не существует"
           cp -r proxy-auto-checker/checked facebook-group-poster/ 2>/dev/null || echo "⚠️ checked/ не существует"
           cp proxy-auto-checker/cover_public.jpg facebook-group-poster/ 2>/dev/null || echo "⚠️ cover_public.jpg не найден"
-          echo "📂 Состав facebook-group-poster:"
-          ls -la facebook-group-poster/
 
-      - name: Run Facebook poster (HTTP-only, no Selenium)
+      - name: Run Facebook poster
         env:
           FACEBOOK_COOKIES_B64: ${{ secrets.FACEBOOK_COOKIES_B64 }}
-          FB_USER_ID: ${{ secrets.FB_USER_ID }}
-          FB_DTSG: ${{ secrets.FB_DTSG }}
         run: |
           cd facebook-group-poster
           python post_to_facebook.py
@@ -55,5 +53,4 @@ jobs:
           path: |
             fb_*.png
             fb_*.html
-            *.log
           if-no-files-found: ignore
