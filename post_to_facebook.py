@@ -148,13 +148,27 @@ def extract_fb_dtsg(session: requests.Session) -> str:
                 return token
 
         log("❌ fb_dtsg/token не найден")
-        # Выведем контекст вокруг всех ключевых слов
+        # Выведем контекст вокруг ВСЕХ ключевых слов
         for keyword in ["dtsg", "DTSG", "LSD", "token", "__dtsg", "anti_csrf", "csrf", "req_token"]:
             idx = text.find(keyword)
             if idx > 0:
                 log(f"\n🔍 '{keyword}' контекст:")
-                log(f"...{text[max(0,idx-80):idx+250]}...")
+                # Выводим 300 символов до и после
+                start = max(0, idx-100)
+                end = min(len(text), idx+300)
+                snippet = text[start:end]
+                # Экранируем управляющие символы
+                snippet = snippet.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                log(snippet)
                 break
+
+        # Если ничего не нашли, сохраним HTML в файл
+        try:
+            with open("fb_page_source.html", "w", encoding="utf-8") as f:
+                f.write(text[:50000])  # первые 50KB
+            log("💾 Первые 50KB HTML сохранены в fb_page_source.html")
+        except Exception:
+            pass
         return ""
     except Exception as e:
         log(f"⚠️ Не удалось извлечь fb_dtsg: {e}")
